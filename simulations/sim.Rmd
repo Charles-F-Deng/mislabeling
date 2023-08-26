@@ -1,0 +1,930 @@
+---
+title: "Mislabel Simulation"
+author: "Ryan C. Thompson"
+output: html_notebook
+---
+
+# Load packages
+
+```{r message=FALSE, warning=FALSE}
+library(rlang)
+is_named <- rlang::is_named
+library(withr)
+library(fs)
+library(qs)
+library(dplyr)
+filter <- dplyr::filter
+select <- dplyr::select
+rename <- dplyr::rename
+matches <- dplyr::matches
+mutate <- dplyr::mutate
+desc <- dplyr::desc
+library(tidyr)
+library(magrittr)
+subtract <- magrittr::subtract
+library(stringr)
+library(glue)
+library(rex)
+library(assertthat)
+library(rctutils)
+library(variancePartition)
+library(ggplot2)
+library(pROC)
+library(scales)
+library(colorspace)
+library(patchwork)
+library(forcats)
+library(limma)
+library(statmod)
+library(qvalue)
+library(S4Vectors)
+library(BiocParallel)
+library(parallel)
+library(future)
+library(future.apply)
+library(future.callr)
+plan(callr)
+
+# Makes EList and MArrayLM objects print nicely, for convenience
+try(source("prettylimma.R"), silent = TRUE)
+```
+
+# Define simulation code
+
+```{r}
+digits <- function(x, base = 10) {
+    1 + floor(log(x, base = base))
+}
+generate_ids <- function(prefix, n) {
+    if (length(n) == 1) {
+        n <- seq_len(n)
+    }
+    num_digits <- digits(max(n))
+    digit_format <- str_c("%0", num_digits, "i")
+    str_c(prefix, sprintf(digit_format, n))
+}
+## The SVD-based check crashes with Lapack errors sometimes
+## design_is_identifiable <- function(dmat, eps = 2e-16) {
+##     min(svd(dmat)$d) > eps
+## }
+design_is_identifiable <- function(dmat, ...) {
+    qrd <- qr(x = dmat, ...)
+    qrd$rank == ncol(dmat)
+}
+
+coolcat_no_filter <-function (fmt, vals = character(), exdent = 2, ...)
+{
+    lbls <- paste(S4Vectors:::selectSome(vals), collapse = " ")
+    txt <- sprintf(fmt, length(vals), lbls)
+    cat(strwrap(txt, exdent = exdent, ...), sep = "\n")
+}
+
+show_EList <- function (object) {
+    cat("class:", class(object), "\n")
+    cat("dim:", dim(object), "\n")
+    rownames <- rownames(object)
+    if (!is.null(rownames))
+        coolcat("rownames (%d): %s\n", rownames)
+    else cat("rownames: NULL\n")
+    coolcat("genes table names (%d): %s\n", names(object$genes))
+    colnames <- colnames(object)
+    if (!is.null(colnames))
+        coolcat("colnames(%d): %s\n", colnames)
+    else cat("colnames: NULL\n")
+    coolcat("targets table names (%d): %s\n", names(object$targets))
+    coolcat_no_filter("E (%d): %s\n", as.vector(object$E))
+    if (!is.null(object$weights))
+        coolcat_no_filter("weights (%d): %s\n", as.vector(object$weights))
+    other_names <- setdiff(names(object), c("E", "weights", "targets", "genes"))
+    if (length(other_names) > 0)
+        coolcat("Other elements (%d): %s\n", other_names)
+    other_slot_names <- setdiff(slotNames(object), ".Data")
+    if (length(other_slot_names) > 0)
+        coolcat("Other slots (%d):  %s\n", other_slot_names)
+}
+
+# TODO - add back reorder_targets option
+# Right now it just reorders E data
+reorder_elist_samples <- function(elist, sample_ids) {
+    assert_that(length(sample_ids) == dim(elist)[[2]], 
+                msg = glue("sample_ids param length {length(sample_ids)} does not match elist sample dimension {dim(elist)[[2]]} "))
+    if (all(sample_ids == elist$targets$E_Data)) {
+        return(elist)
+    }
+    reordered_elist <- elist
+    reordered_elist$E <- elist$origs$E_orig[, sample_ids]
+    colnames(reordered_elist) <- colnames(elist)
+    reordered_elist$targets %<>% mutate(
+        E_Data = sample_ids,
+        Mislabeled = !(Sample_ID == E_Data)
+    )
+    return(reordered_elist)
+}
+
+## Example values for testing
+local({
+    n_subjects_per_group = 3
+    n_samples_per_subject = 10
+    n_features = 10
+    n_swaps = 2
+    swap_systematic = TRUE
+    n_sv = 2
+    fraction_de_case = 0.5
+    case_sd = 0.1
+    subject_sd = 0.1
+    sv_sd = 0.1
+    resid_sd = 0.1
+    sex_sd = 0.1
+    age_sd = 0.1
+    seed = 1986
+})
+
+sim_mislabeled_data <- function (
+    n_subjects_per_group,
+    n_samples_per_subject,
+    n_features,
+    n_swaps,
+    swap_systematic,
+    n_sv,
+    fraction_de_case,
+    case_sd,
+    sv_sd,
+    subject_sd,
+    resid_sd,
+    sex_sd = 0,
+    age_sd = 0,
+    seed
+) {
+    if (!missing(seed)) {
+        sim_params <- mget(c(
+            "n_subjects_per_group",
+            "n_samples_per_subject",
+            "n_features",
+            "n_swaps",
+            "swap_systematic",
+            "n_sv",
+            "fraction_de_case",
+            "case_sd",
+            "subject_sd",
+            "sv_sd",
+            "resid_sd",
+            "sex_sd",
+            "age_sd"
+        ))
+        res <- with_seed(seed, do.call(sim_mislabeled_data, sim_params))
+        res$params$seed <- seed
+        return(res)
+    }
+    
+    n_samples_per_group <- n_subjects_per_group * n_samples_per_subject
+    n_samples <- 2 * n_samples_per_group
+    
+    assert_that(
+        n_subjects_per_group > 1,
+        n_samples_per_subject > 0,
+        n_features > 0,
+        n_swaps >= 0,
+        n_swaps <= n_samples/2,
+        is.logical(swap_systematic),
+        n_sv >= 0,
+        fraction_de_case >= 0,
+        fraction_de_case <= 1,
+        case_sd >= 0,
+        subject_sd >= 0,
+        sv_sd >= 0,
+        resid_sd >= 0,
+        sex_sd >= 0,
+        age_sd >= 0
+    )
+    if (n_sv < 1 && sv_sd > 0) {
+        warning("Setting SV signal to zero since there are not SVs")
+        n_sv <- 1
+        sv_sd <- 0
+    }
+    
+    ## Generate the subjects
+    ctrl_subjects <- generate_ids("Ctrl", n_subjects_per_group)
+    case_subjects <- generate_ids("Case", n_subjects_per_group)
+    subject_meta_table <- tibble(
+        Subject_ID = c(ctrl_subjects, case_subjects),
+        Status = c(rep_along(ctrl_subjects, "Control"), rep_along(case_subjects, "Case")) %>%
+            factor(levels = c("Control", "Case"))
+    ) %>% 
+        mutate(
+            Sex = sample(c("Male", "Female"), size=n(), replace=TRUE),
+            Age = rbinom(n=n(), size=60, prob=0.2) + 20
+        )
+    
+    ## Generate the samples
+    sample_meta_table <- tibble(
+        Subject_ID = rep(subject_meta_table$Subject_ID, each=n_samples_per_subject)
+    ) %>% 
+        group_by( Subject_ID ) %>% 
+        mutate(
+            Sample_ID = generate_ids(str_c(Subject_ID, "_Sample"), n_samples_per_subject)
+        ) %>% 
+        ungroup() %>% 
+        left_join(
+            subject_meta_table, by="Subject_ID"
+        ) %>% 
+        mutate(
+            Mislabeled = FALSE,
+            E_Data = Sample_ID
+        ) %>% 
+        relocate(Sample_ID)
+    
+    ctrl_samples <- sample_meta_table %>% filter(Status == "Control") %>% pull(Sample_ID)
+    case_samples <- sample_meta_table %>% filter(Status == "Case") %>% pull(Sample_ID)
+    
+    assert_that(length(unique(sample_meta_table$Sex)) > 1, msg = "Only one sex simulated")
+    
+    sv_names <- generate_ids("SV", n_sv)
+    for (svi in sv_names) {
+        sample_meta_table[[svi]] <- rnorm(nrow(sample_meta_table))
+    }
+    
+    n_de_features <- round(n_features * fraction_de_case)
+    if (n_de_features == 0 && fraction_de_case != 0) {
+        warning("fraction_de_case is too small, no features are DE")
+    }
+    
+    ## Generate the features
+    feature_meta_table <- tibble(
+        Feature_Number = seq_len(n_features),
+        DE = Feature_Number <= n_de_features,
+        Feature_ID = generate_ids("Feature", n_features) %>%
+            str_c(if_else(DE, "_DE", ""))
+    ) %>%
+        select(Feature_ID, Feature_Number, DE, everything())
+    
+    ## Generate the coefs
+    design_case <- model.matrix(~1 + Status, sample_meta_table)[, 2, drop = FALSE] %>%
+        ## Convert to sum-to-zero
+        subtract(mean(unique(.)))
+    design_sex <- model.matrix(~1 + Sex, sample_meta_table)[, 2, drop = FALSE] %>%
+        subtract(mean(unique(.)))
+    design_age <- as.matrix(sample_meta_table["Age"]) %>%
+        ## Make sure that age design has same scale as other SVs (mean=0, sd=1)
+        scale()
+    design_subject <- model.matrix(~0 + Subject_ID, sample_meta_table)
+    design_sv <- as.matrix(sample_meta_table[sv_names])
+    ## Use abs so that all true logFC are positive
+    eta_case <- design_case %*% matrix(ncol = n_features, nrow = ncol(design_case), abs(rnorm(n_features * ncol(design_case)))) %>%
+        ## Set all eta to 0 for non-DE genes
+        scale(center = FALSE, scale = if_else(feature_meta_table$DE, 1, Inf))
+    eta_sex <- design_sex %*% matrix(ncol = n_features, nrow = ncol(design_sex), rnorm(n_features * ncol(design_sex)))
+    eta_age <- design_age %*% matrix(ncol = n_features, nrow = ncol(design_age), rnorm(n_features * ncol(design_age)))
+    eta_subject <- design_subject %*% matrix(ncol = n_features, nrow = ncol(design_subject), rnorm(n_features * ncol(design_subject)))
+    eta_sv <- design_sv %*% matrix(ncol = n_features, nrow = ncol(design_sv), rnorm(n_features * ncol(design_sv)))
+    eta_resid <- matrix(ncol = n_features, nrow = nrow(sample_meta_table), rnorm(n_features * nrow(sample_meta_table)))
+    
+    ## Put all the expression effects together
+    expr_mat <- t(
+        eta_case * case_sd +
+            eta_sex * sex_sd + 
+            eta_age * age_sd +
+            eta_subject * subject_sd + 
+            eta_sv * sv_sd +
+            eta_resid * resid_sd
+    ) %>%
+        set_colnames(sample_meta_table$Sample_ID) %>%
+        set_rownames(feature_meta_table$Feature_ID)
+    attr(expr_mat, "scaled:scale") <- NULL
+    
+    ## Build the EList
+    elist <- new("EList", list(
+        E = expr_mat,
+        genes = as.data.frame(feature_meta_table),
+        targets = as.data.frame(sample_meta_table),
+        other = list(
+            eta_sv = t(eta_sv),
+            eta_case = t(eta_case),
+            eta_sex = t(eta_sex),
+            eta_age = t(eta_age),
+            eta_resid = t(eta_resid)
+        ),
+        params = mget(c(
+            "n_subjects_per_group",
+            "n_samples_per_subject",
+            "n_features",
+            "n_swaps",
+            "swap_systematic",
+            "n_sv",
+            "fraction_de_case",
+            "case_sd",
+            "subject_sd",
+            "sv_sd",
+            "resid_sd",
+            "sex_sd",
+            "age_sd"
+        ))
+    ))
+    
+    ## Discard unused eta matrices
+    if (case_sd == 0 || n_de_features == 0) {
+        elist$other$eta_case <- NULL
+    }
+    sd_eta_pairs = list(c("sex_sd", "eta_sex"),
+                        c("age_sd", "eta_age"),
+                        c("sv_sd", "eta_sv"),
+                        c("resid_sd", "eta_resid"))
+    for (pair in sd_eta_pairs) {
+        var_sd <- pair[[1]]
+        eta_var <- pair[[2]]
+        if (var_sd == 0) {
+            elist$other[[eta_var]] <- NULL
+        }
+    }
+  
+    ## Apply dimnames to all relevant sub-elements in the EList
+    dimnames(elist) <- dimnames(elist)
+        
+    ## Generate swaps
+    if (swap_systematic) {
+        swaps <- cbind(
+            sample(ctrl_samples, n_swaps),
+            sample(case_samples, n_swaps)
+        )
+    } else {
+        swaps <- matrix(sample(sample_meta_table$Sample_ID, n_swaps * 2), ncol = 2)
+    }
+    swap_from <- match(swaps[,1], sample_meta_table$Sample_ID)
+    swap_to <- match(swaps[,2], sample_meta_table$Sample_ID)
+    swap_index <- seq_len(nrow(sample_meta_table))
+    swap_index[c(swap_from, swap_to)] <- c(swap_to, swap_from)
+    swap_sample_ids <- elist$targets$Sample_ID[swap_index]
+    
+    ## Apply swaps to expression matrix thus generating mislabeled samples
+    reordered_elist <- reorder_elist_samples(elist, swap_sample_ids)
+    
+    ## Store original expressions for reference when relabeling samples
+    ## and original targets so we can access initial Sample_ID/E_Data 
+    ## pairs to assess the results of the label correction algorithm
+    reordered_elist$origs <- list(
+        E_orig = reordered_elist$E,
+        targets_orig = reordered_elist$targets
+    )
+
+    return(reordered_elist)
+}
+
+mislabel_handlers <- list(
+    ignore = identity,
+    all_remove = function(elist) {
+        return(elist[, !elist$targets$Mislabeled])
+    },
+    all_correct = function(elist) {
+        ## This should just recover the original elist with no mislabeling
+        return(reorder_elist_samples(elist, elist$targets$Sample_ID))
+    },
+    majority_remove = function(elist) {
+        ## For each subject, if there isn't a majority consensus among the samples
+        ## remove all samples for that subject
+        sample_mislabel_table <- elist$targets %>%
+            group_by(Subject_ID) %>% 
+            mutate(
+                Subject_Pct_Mislabeled = mean(Mislabeled)
+            ) %>% ungroup() %>% 
+            mutate(
+                Consensus = Subject_Pct_Mislabeled < 0.5
+            )
+        return(elist[, sample_mislabel_table$Consensus])
+    },
+    majority_correct = function(elist) {
+        ## For each mislabeled sample, if the majority of samples from the same subject are correctly
+        ## labeled, then assume we can fix the mislabel
+        sample_mislabel_table <- elist$targets %>%
+            group_by(Subject_ID) %>%
+            mutate(
+                Subject_Pct_Mislabeled = mean(Mislabeled),
+            ) %>% ungroup() %>%
+            mutate(
+                Correctable = Mislabeled & Subject_Pct_Mislabeled < 0.5,
+                Relabeled_Samples = ifelse(Correctable, Sample_ID, E_Data)
+            )
+        return(reorder_elist_samples(elist, sample_mislabel_table$Relabeled_Samples))
+    },
+    majority_correct_and_remove = function(elist) {
+        elist <- mislabel_handlers$majority_correct(elist)
+        elist <- mislabel_handlers$majority_remove(elist)
+        return(elist)
+    }
+)
+handle_mislabels_options <- names(mislabel_handlers)
+
+## Function to generate simulated data, run the real time learner,
+## and save the resulting model
+run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_matrices = FALSE) {
+    handle_mislabels <- as.character(handle_mislabels)
+    handle_mislabels <- match.arg(handle_mislabels)
+
+    tsmsg("Simulating dataset")
+    ## We simulate 2x as many subjects so we can use the 2nd half
+    ## for validation of real time prediction learned from the
+    ## entire first half.
+    elist <- sim_mislabeled_data(...)
+    
+    show_EList(elist)
+    ## The eta matrices take up a lot of space
+    if (!save_eta_matrices) {
+        tsmsg("Clearing eta matrices")
+        elist$other <- NULL
+    }
+    
+    tsmsg("Handling mislabels with action: ", handle_mislabels)
+    if (handle_mislabels %in% handle_mislabels_options) {
+        handle_mislabels_function <- mislabel_handlers[[handle_mislabels]]
+    } else {
+        stop(glue("Unrecognized value for handle_mislabels: {handle_mislabels}"))
+    }
+    
+    elist <- handle_mislabels_function(elist)
+    
+    unique_var_values <- lapply(elist$targets[, c("Status", "Sex", "Age")],
+        function(var) {
+            return(length(unique(var)))
+        })
+    if (ncol(elist) == 0 | any(unique_var_values < 2)) {
+        ## If all samples are removed or if any variable has fewer than 2 unique values
+        ## return a result table with all NA stats
+        tt <- elist$genes %>% 
+            as_tibble %>% 
+            mutate(logFC = NA_real_, AveExpr = NA_real_, t = NA_real_, P.Value = NA_real_, adj.P.Val = NA_real_)
+        return(tt)
+    }
+    
+    tsmsg("Running limma")
+    ## We model the surrogate variables because even swaps within
+    ## groups will compromise the modeling of SVs, which should
+    ## reduce the performance of the model.
+    sv_names <- str_subset(colnames(elist$targets), "^SV[0-9]+")
+    design_formula <- as.formula(str_c(c("~1", "Status", "Sex", "Age", sv_names), collapse = "+"))
+    design <- model.matrix(design_formula, elist$targets)
+    
+    if (!design_is_identifiable(design)) {
+        ## If the design is not identifiable due to nesting
+        ## return a result table with all NA stats
+        tt <- elist$genes %>% 
+            as_tibble %>% 
+            mutate(logFC = NA_real_, AveExpr = NA_real_, t = NA_real_, P.Value = NA_real_, adj.P.Val = NA_real_)
+        return(tt)
+    }
+    
+    # If each subject has only one sample, then Subject_ID effect
+    # is subsumed by sample residual, and we can fit a fixed effects model
+    # Otherwise if there are subjects with multiple samples, the Subject_ID
+    # is nested in Status, and we need to fit a mixed model
+    if (anyDuplicated(elist$targets$Subject_ID) == 0) {
+        fit <- eBayes(lmFit(elist, design), trend = FALSE, robust = FALSE)
+    } else {
+        # Commenting this out for now since it takes a long time and slows debugging
+        # dupcor <- duplicateCorrelation(elist, design, block = elist$targets$Subject_ID)
+        # Placeholder correlation
+        dupcor <- list(consensus=0.1)
+        fit <- eBayes(lmFit(elist, design, block = elist$targets$Subject_ID, correlation=dupcor$consensus), trend = FALSE, robust = FALSE)
+    }
+    tt <- topTable(fit, number = Inf, coef = "StatusCase")
+    
+    label_outcomes <- elist$other$targets_orig %>% 
+        select(Sample_ID, E_Data, Mislabeled) %>% 
+        rename(E_Data_init = E_Data) %>% 
+        mutate(
+            E_Data_final = elist$targets,
+            
+        )
+    
+    tsmsg("Collecting results")
+    return(as_tibble(tt))
+}
+```
+
+# Set up simulation grid
+
+```{r}
+## TODO: nonlinear time effect - time splines
+grid_list <- list(
+    tibble(handle_mislabels = fct_inorder(eval(formals(run_sim)$handle_mislabels))),
+    tibble(n_swaps = seq(from = 0, to = 150, by = 15)),
+    tibble(swap_systematic = c(FALSE, TRUE)),
+    ## Not varying any of these
+    tibble(
+        n_subjects_per_group = 30,
+        n_samples_per_subject = 5,
+        n_features = 100,
+        n_sv = 5,
+        fraction_de_case = 0.5,
+        case_sd = 0.1,
+        subject_sd = 0.1,
+        sv_sd = 0.1,
+        resid_sd = 0.05,
+        sex_sd = 0.1,
+        age_sd = 0.1
+    ),
+    ## Run each simulation 31 times with different seeds
+    #tibble(seed = seq(from = 1986, length.out = 31))
+    tibble(seed = seq(from = 1986, length.out = 2))
+)
+sim_param_names <- sort(unlist(sapply(grid_list, colnames)))
+sim_table <- grid_list %>%
+    Reduce(f = cross_join) %>%
+    distinct %>%
+    filter(!(handle_mislabels == "remove" & n_swaps >= n_subjects_per_group * n_samples_per_subject)) %>%
+    arrange(seed)
+sim_table
+```
+
+# Run simulations
+
+```{r}
+make_param_string <- function(params) {
+    params <- params[sort(names(params))]
+    Map(str_c, names(params), "=", params) %>%
+        c(sep = "|") %>%
+        do.call(what = str_c)
+}
+
+if (file_exists("sim_results.qs")) {
+    tsmsg("Reading saved simulation results")
+    # Read the results file but filter/merge with current planned simulations
+    sim_result_table <- sim_table %>% 
+        left_join(qread("sim_results.qs", nthreads = availableCores())) %>%
+        # Fill in any NULL entries with "not run yet" errors
+        mutate(top_table = if_else(
+            sapply(top_table, is.null), 
+            list(try(stop("Simulation not run yet"), silent = TRUE)),
+            top_table
+        ))
+} else {
+    sim_result_table <- sim_table %>%
+        mutate(top_table = list(try(stop("Simulation not run yet"), silent = TRUE)))
+}
+
+need_to_run <- sapply(sim_result_table$top_table, is, "try-error")
+if (any(need_to_run)) {
+    tsmsg("Running ", sum(need_to_run), " simulations")
+    sim_result_table[need_to_run,] %<>% mutate(top_table = {
+        map_args <- list(f = function(...) try(run_sim(...), silent = FALSE))
+        map_args[sim_param_names] <- .[sim_param_names]
+        do.call(future_Map, map_args)
+    })
+    need_to_run <- sapply(sim_result_table$top_table, is, "try-error")
+    assert_that(!any(need_to_run))
+    qsave(sim_result_table, "sim_results.qs", nthreads = availableCores())
+}
+```
+
+# Collect simulation results
+
+```{r}
+fdr_threshold <- 0.05
+
+sim_result_long_table <- sim_result_table %>%
+    filter(sapply(top_table, is.data.frame)) %>%
+    unnest(top_table) %>%
+    mutate(
+        ## All true logFC are >0, so negative logFC is a non-DE
+        ## call for our purposes
+        Called_DE = adj.P.Val <= fdr_threshold & logFC > 0,
+        Feature_Call = case_when(
+            DE & Called_DE ~ "TP",
+            DE & !Called_DE ~ "FN",
+            !DE & Called_DE ~ "FP",
+            !DE & !Called_DE ~ "TN",
+            .default = NA
+        ) %>% factor(levels = c("TP", "TN", "FP", "FN"))
+    )
+
+sim_result_auc_table <- sim_result_long_table %>% 
+    filter(!is.na(DE) & !is.na(adj.P.Val)) %>%
+    group_by(pick(all_of(sim_param_names))) %>% 
+    summarise(
+      # < param indicates that control is greater than case
+      # Need to use t instead of adj.P.Val because adj.P.Val is direction-blind 
+      # (after swapping n_samples_per_group times, you get back to a very low p-value)
+      AUROC = as.numeric(roc(DE, t, levels=as.factor(c(FALSE, TRUE)), direction="<")$auc),
+      .groups = "drop"
+    )
+
+sim_result_perf_table <- sim_result_long_table %>%
+    filter(!is.na(Feature_Call)) %>%
+    group_by(pick(all_of(sim_param_names)), Feature_Call) %>%
+    summarise(Num_Genes = n(), .groups = "drop") %>%
+    pivot_wider(
+        names_from = "Feature_Call",
+        values_from = "Num_Genes",
+        values_fill = 0
+    ) %>%
+    mutate(
+        Recall = TP / (TP + FN),
+        Specificity = TN / (TN + FP),
+        Precision = TP / (TP + FP),
+        NPV = TN / (TN + FN),
+        FDR = FP / (FP + TP),
+        Accuracy = (TP + TN) / n_features
+    ) %>%
+    full_join(sim_result_auc_table, by=sim_param_names, keep=FALSE) %>% 
+    mutate( 
+      ## This is assuming you sample without replacement when simulating swaps
+      Pct_Swapped = 100 * n_swaps / (n_samples_per_subject * n_subjects_per_group),
+      Swap_Type = if_else(swap_systematic, "Always swap case with control", "Swap pairs at random") %>% fct_inorder
+    )
+
+sim_result_perf_summary_table <- sim_result_perf_table %>%
+    group_by(pick(all_of(setdiff(sim_param_names, "seed")))) %>%
+    summarise(
+        N_sims = n(),
+        across(
+            c(FN, FP, TN, TP, Recall, Specificity, Precision, NPV, FDR, Accuracy, AUROC),
+            c(
+                mean = \(x) mean(x, na.rm = TRUE),
+                sd = \(x) sd(x, na.rm = TRUE),
+                median = \(x) median(x, na.rm = TRUE),
+                ## Modify min and max functions so they return NA for empty lists
+                ## Rather than Inf and -Inf
+                min = function(x) {
+                    val <- min(x, na.rim = TRUE)
+                    if (is.infinite(val)) {
+                        return(NA_real_)
+                    }
+                    return(val)
+                },
+                max = function(x) {
+                    val <- max(x, na.rim = TRUE)
+                    if (is.infinite(val)) {
+                        return(NA_real_)
+                    }
+                    return(val)
+                },
+                se = function(x) {
+                    x <- x[!is.na(x)]
+                    if (length(x) == 0) { return(NA_real_) }
+                    sd(x) / sqrt(length(x))
+                }
+            )
+        ),
+        .groups = "drop"
+    ) %>%
+    mutate(
+        ## This is assuming you sample without replacement when simulating swaps
+        Pct_Swapped = 100 * n_swaps / (n_samples_per_subject * n_subjects_per_group),
+        Swap_Type = if_else(swap_systematic, "Always swap case with control", "Swap pairs at random") %>% fct_inorder 
+    )
+```
+
+# Plot results
+
+## Error bar plots
+
+```{r fig.height=9, fig.width=8}
+make_y_aes <- \(measure) aes_string(
+    y = glue("{measure}_mean"),
+    ymin = glue("{measure}_mean - {measure}_se"),
+    ymax = glue("{measure}_mean + {measure}_se")
+)
+perf_names <- c("FN", "FP", "TN", "TP", "Recall", "Specificity", "Precision", "NPV", "FDR", "Accuracy", "AUROC")
+perf_ylim_max <- if_else(perf_names %in% c("FN", "FP", "TN", "TP"), 5000, 1) %>%
+    set_names(perf_names)
+p1 <- ggplot(sim_result_perf_summary_table) +
+    aes(
+        x = Pct_Swapped,
+        color = handle_mislabels,
+        fill = handle_mislabels,
+        group = handle_mislabels
+    ) +
+    make_y_aes("Precision") +
+    # geom_ribbon(alpha = 0.2, color = NA)`` + 
+    geom_errorbar(
+        width = 9,
+        alpha = 0.8,
+        position = position_dodge(width = 3)
+    ) +
+    geom_line(
+        alpha = 0.5,
+        position = position_dodge(width = 3)
+    ) +
+    geom_point(position = position_dodge2(width = 3), shape = 23) +
+    facet_wrap("Swap_Type") + 
+    labs(
+        x = "Percent of samples mislabeled", 
+        color = "How mislabels are handled",
+        fill = "How mislabels are handled"
+    ) + 
+    scale_color_brewer(palette = "Set1") + 
+    scale_fill_brewer(palette = "Set1")
+perf_plots <- lapply(perf_names, \(pn) p1 + make_y_aes(pn) + ylim(0, perf_ylim_max[pn]) + ylab(glue("{pn} ± Std. Err."))) %>%
+    set_names(perf_names)
+
+perf_include <- c("Recall", "Precision", "AUROC")
+p <- wrap_plots(perf_plots[perf_include], ncol = 1, guides = "collect") & theme(legend.position = "top")
+print(p)
+with_pdf("sim_errbar.pdf", print(p), width = 8, height = 3 * length(perf_include))
+```
+
+## Boxplots
+
+```{r fig.height=9, fig.width=8}
+
+perf_boxplots <- lapply(
+    perf_names,
+    \(pn) ggplot(sim_result_perf_table %>% filter(n_swaps %% 10 == 0)) +
+        aes(
+            x = Pct_Swapped,
+            color = handle_mislabels,
+            fill = handle_mislabels,
+            group = handle_mislabels
+        ) +
+        aes_string(y = pn) +
+        ylim(0, perf_ylim_max[pn]) +
+        geom_boxplot(
+            aes(group = interaction(Pct_Swapped, handle_mislabels, Swap_Type)),
+            alpha = 0.2,
+            position = position_dodge(width = 3)
+        ) +
+        # geom_line(
+        #     aes_string(y = glue("{pn}_median")), data = sim_result_perf_summary_table,
+        #     position = position_dodge(width = 3),
+        #     alpha = 0.5
+        # ) +
+        facet_wrap("Swap_Type") + 
+        labs(
+            x = "Percent of samples mislabeled", 
+            color = "How mislabels are handled",
+            fill = "How mislabels are handled"
+        ) + 
+        scale_color_brewer(palette = "Set1") + 
+        scale_fill_brewer(palette = "Set1") + 
+        scale_x_continuous(breaks = seq(from = 0, to = 100, by = 20))
+) %>%
+    set_names(perf_names)
+
+perf_include <- c("Recall", "Precision", "AUROC")
+boxp <- wrap_plots(perf_boxplots[perf_include], ncol = 1, guides = "collect") & theme(legend.position = "top")
+# Apparently R can't create files in PWD??? WTF?
+with_pdf(fs::path(tempdir(), "sim_boxplot.pdf"), print(boxp), width = 8, height = 3 * length(perf_include))
+file_move(fs::path(tempdir(), "sim_boxplot.pdf"), fs::path(getwd(), "sim_boxplot.pdf"))
+#pdf(fs::path(getwd(), "sim_boxplot.pdf"), width = 8, height = 6)
+print(boxp)
+# dev.off()
+# qsave(boxp, path(getwd(), "sim_boxplot.qs"))
+```
+
+# Charles - playing around with code
+
+```{r}
+
+my_table <- sim_result_long_table %>% 
+  filter(
+    handle_mislabels == "ignore",
+    n_swaps == 120,
+    swap_systematic,
+    seed == 1986
+  ) %>% select(DE, Called_DE, adj.P.Val)
+
+```
+
+
+```{r}
+
+corr_timer_function <- function(n_features) {
+    start <- Sys.time()
+    params <- list(
+      n_subjects_per_group = 50,
+      n_samples_per_subject = 3,
+      #n_features = 200,
+      n_swaps = 20,
+      swap_systematic = FALSE,
+      n_sv = 5,
+      fraction_de_case = 0.5,
+      case_sd = 0.1,
+      subject_sd = 0.1,
+      sex_sd = 0.1,
+      age_sd = 0.1,
+      sv_sd = 0.1,
+      resid_sd = 0.1,
+      seed = 1986)
+    elist <- do.call(sim_mislabeled_data, c(params, n_features=n_features))
+    sv_names <- str_subset(colnames(elist$targets), "^SV[0-9]+")
+    design_formula <- as.formula(str_c(c("~1", "Status", "Sex", "Age", sv_names), collapse = "+"))
+    design <- model.matrix(design_formula, elist$targets)
+    dupcor <- duplicateCorrelation(elist, design, block = elist$targets$Subject_ID)
+    end <- Sys.time()
+    return(as.numeric(end - start))
+}
+
+corr_timer_table <- data.frame(
+  n_features = seq.int(10, 100, by=10)
+)
+corr_timer_table$corr_time <- sapply(corr_timer_table$n_features, corr_timer_function)
+
+ggplot(data=corr_timer_table, aes(x=n_features, y=corr_time)) +
+  geom_line() + geom_point()
+
+```
+
+
+
+```{r}
+params <- list(
+  n_subjects_per_group = 10,
+  n_samples_per_subject = 3,
+  n_features = 5,
+  n_swaps = 10,
+  swap_systematic = FALSE,
+  n_sv = 5,
+  fraction_de_case = 0.5,
+  case_sd = 0.1,
+  subject_sd = 0.1,
+  sex_sd = 0.1,
+  age_sd = 0.1,
+  sv_sd = 0.1,
+  resid_sd = 0.1,
+  seed = 1986)
+
+elist <- do.call(sim_mislabeled_data, params)
+
+tt <- do.call(run_sim, c(params, handle_mislabels="majority"))
+
+test_auc_conditions_list <- as.list(sim_result_long_table[1,sim_param_names])
+test_auc_table <- sim_result_long_table %>% 
+  filter(
+      #all(sapply(names(test_auc_conditions_list), function(col) get(col) == test_auc_conditions_list[[col]]))
+      age_sd == 0,
+      case_sd == 10,
+      fraction_de_case == 0.5,
+      handle_mislabels == "ignore",
+      n_features == 10000,
+      n_samples_per_subject == 3,
+      n_subjects_per_group == 50,
+      n_sv == 5,
+      n_swaps == 0,
+      resid_sd == 0.05,
+      seed == 1986,
+      sex_sd == 0,
+      sv_sd == 0,
+      !swap_systematic
+  )
+
+```
+
+
+## Switching labels vs data
+
+```{r}
+# 1. Set seed, create elist and scramble targets but not data
+# 2. With same seed as #1, create elist but now scramble data and not targets
+# 3. 
+
+library("clipr")
+
+params <- list(
+  n_samples_per_group = 50,
+  n_features <- 10000,
+  n_swaps = 10,
+  swap_systematic = TRUE,
+  n_sv = 5,
+  fraction_de_case = 0.5,
+  case_sd = 0.1,
+  sv_sd = 0.1,
+  resid_sd = 0.1,
+  seed = 1986)
+
+# Scramble targets but not data
+params1 <- c(params, reorder_data=FALSE, reorder_targets=TRUE)
+elist1 <- do.call(sim_mislabeled_data, params1)
+
+# Scramble data but not targets
+params2 <- c(params, reorder_data=TRUE, reorder_targets=FALSE)
+elist2 <- do.call(sim_mislabeled_data, params2)
+
+clipr::write_clip(elist1$targets)
+clipr::write_clip(elist2$targets)
+
+# Check that the set of mislabeled samples is the same in both instances (the seed worked)
+swapped_samples1 <- sort(filter(elist1$targets, Mislabeled==TRUE)$Sample_ID)
+swapped_samples2 <- sort(filter(elist2$targets, Mislabeled==TRUE)$Sample_ID)
+assert_that(identical(swapped_samples1, swapped_samples2), msg="The two simulations have different sample swaps")
+
+# Check that the simulated SV values are identical
+# What is the equivalent of [x for x in my_list if x[:2]=="SV"]
+sv_cols <- c("SV1", "SV2", "SV3", "SV4", "SV5")
+sv_diff <- elist1$targets[elist2$targets$swap_index, sv_cols] - elist2$targets[, sv_cols]
+sv_checksum <- sum(abs(targets_diff))
+assert_that(sv_checksum == 0, msg="The two simulations generated different SV values")
+
+# Check that the simulated expressions are identical
+elist_diff <- elist1$E[,colnames(elist2$E)] - elist2$E
+elist_checksum <- sum(abs(elist_diff))
+assert_that(elist_checksum == 0, msg="THe two simulations generated different E values")
+
+# Check that the lm results are identical for all three mislabeling treatment options
+tdiff <- list()
+for (handle_method in eval(formals(run_sim)$handle_mislabels)) {
+  results1 <- do.call(run_sim, c(params1, handle_mislabels=handle_method))
+  results1 <- results1[order(results1$Feature_ID), ]
+  results2 <- do.call(run_sim, c(params2, handle_mislabels=handle_method))
+  results2 <- results2[order(results2$Feature_ID), ]
+  tdiff[[handle_method]] <- results1$t - results2$t
+}
+
+```
+
