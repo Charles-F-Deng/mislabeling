@@ -49,6 +49,84 @@ plan(callr)
 try(source("prettylimma.R"), silent = TRUE)
 ```
 
+# Implement mislabel handlers
+
+```{r}
+# TODO - add back reorder_targets option
+# Right now it just reorders exp data
+reorder_elist_samples <- function(elist, sample_ids) {
+    assert_that(length(sample_ids) == dim(elist)[[2]], 
+                msg = glue("sample_ids param length {length(sample_ids)} does not match elist sample dimension {dim(elist)[[2]]}"))
+    if (all(sample_ids == elist$targets$E_Sample_ID)) {
+        return(elist)
+    }
+    reordered_elist <- elist
+    reordered_elist$E <- elist$origs$E_true[, sample_ids]
+    colnames(reordered_elist) <- colnames(elist)
+    reordered_elist$targets %<>% mutate(
+        E_Sample_ID = sample_ids,
+        E_Subject_ID = lapply(sample_ids, \(x) str_split_1(x, "_")[1]),
+        Mislabeled = !(Sample_ID == E_Sample_ID)
+    )
+    return(reordered_elist)
+}
+
+mislabel_handlers <- list(
+    ignore = identity,
+    all_remove = function(elist) {
+        return(elist[, !elist$targets$Mislabeled])
+    },
+    all_correct = function(elist) {
+        ## This should just recover the original elist with no mislabeling
+        return(reorder_elist_samples(elist, elist$targets$Sample_ID))
+    },
+    # majority_remove = function(elist) {
+    #     ## For each subject, if there is a consensus among the samples
+    #     ## remove minority samples for that subject
+    #     ## If there isn't a consensus among samples for that subject
+    #     ## remove every sample for that subject
+    #     sample_mislabel_table <- elist$targets %>%
+    #         select(Sample_ID, Subject_ID, Mislabeled, E_Sample_ID, E_Subject_ID) %>% 
+    #         group_by(Subject_ID) %>%
+    #         mutate(
+    #             n_votes = n(),
+    #             Majority = ifelse(any(table(E_Subject_ID) > n_votes/2), mode(E_Subject_ID), NA)
+    #         )
+    #         mutate(
+    #             Consensus = Subject_Pct_Mislabeled < 0.5,
+    #             Minority = 
+    #             Remove = (Consensus & Minority) | !Consensus
+    #         )
+    #     return(elist[, !sample_mislabel_table$Remove])
+    # }
+    majority_correct = function(elist) {
+        ## For each mislabeled sample, if the majority of samples from the same subject are correctly
+        ## labeled, then assume we can fix the mislabel
+        sample_mislabel_table <- elist$targets %>%
+            group_by(Subject_ID) %>%
+            mutate(
+                Subject_Pct_Mislabeled = mean(Mislabeled),
+            ) %>% ungroup() %>%
+            mutate(
+                Correctable = Mislabeled & Subject_Pct_Mislabeled < 0.5,
+                Relabeled_Samples = ifelse(Correctable, Sample_ID, E_Sample_ID)
+            )
+        return(reorder_elist_samples(elist, sample_mislabel_table$Relabeled_Samples))
+    }
+    # majority_correct_and_remove = function(elist) {
+    #     elist <- mislabel_handlers$majority_correct(elist)
+    #     sample_mislabel_table <- elist$targets %>% 
+    #         group_by(Subject_ID) %>% 
+    #         mutate(
+    #             Subject_Pct_Mis
+    #         )
+    #     elist <- mislabel_handlers$majority_remove(elist)
+    #     return(elist)
+    # }
+)
+handle_mislabels_options <- names(mislabel_handlers)
+```
+
 # Define simulation code
 
 ```{r}
@@ -103,31 +181,13 @@ show_EList <- function (object) {
         coolcat("Other slots (%d):  %s\n", other_slot_names)
 }
 
-# TODO - add back reorder_targets option
-# Right now it just reorders E data
-reorder_elist_samples <- function(elist, sample_ids) {
-    assert_that(length(sample_ids) == dim(elist)[[2]], 
-                msg = glue("sample_ids param length {length(sample_ids)} does not match elist sample dimension {dim(elist)[[2]]} "))
-    if (all(sample_ids == elist$targets$E_Data)) {
-        return(elist)
-    }
-    reordered_elist <- elist
-    reordered_elist$E <- elist$origs$E_orig[, sample_ids]
-    colnames(reordered_elist) <- colnames(elist)
-    reordered_elist$targets %<>% mutate(
-        E_Data = sample_ids,
-        Mislabeled = !(Sample_ID == E_Data)
-    )
-    return(reordered_elist)
-}
-
 ## Example values for testing
 local({
-    n_subjects_per_group = 3
-    n_samples_per_subject = 10
-    n_features = 10
-    n_swaps = 2
-    swap_systematic = TRUE
+    n_subjects_per_group = 10
+    n_samples_per_subject = 3
+    n_features = 2
+    n_swaps = 10
+    swap_systematic = FALSE
     n_sv = 2
     fraction_de_case = 0.5
     case_sd = 0.1
@@ -229,7 +289,8 @@ sim_mislabeled_data <- function (
         ) %>% 
         mutate(
             Mislabeled = FALSE,
-            E_Data = Sample_ID
+            E_Sample_ID = Sample_ID,
+            E_Subject_ID = Subject_ID
         ) %>% 
         relocate(Sample_ID)
     
@@ -317,7 +378,11 @@ sim_mislabeled_data <- function (
             "resid_sd",
             "sex_sd",
             "age_sd"
-        ))
+        )),
+        ## Store true expressions for reference when relabeling samples
+        origs = list(
+            E_true = expr_mat
+        )
     ))
     
     ## Discard unused eta matrices
@@ -338,7 +403,8 @@ sim_mislabeled_data <- function (
   
     ## Apply dimnames to all relevant sub-elements in the EList
     dimnames(elist) <- dimnames(elist)
-        
+       
+    ## TODO: add swapping with replacement 
     ## Generate swaps
     if (swap_systematic) {
         swaps <- cbind(
@@ -357,60 +423,12 @@ sim_mislabeled_data <- function (
     ## Apply swaps to expression matrix thus generating mislabeled samples
     reordered_elist <- reorder_elist_samples(elist, swap_sample_ids)
     
-    ## Store original expressions for reference when relabeling samples
-    ## and original targets so we can access initial Sample_ID/E_Data 
-    ## pairs to assess the results of the label correction algorithm
-    reordered_elist$origs <- list(
-        E_orig = reordered_elist$E,
-        targets_orig = reordered_elist$targets
-    )
+    ## Store targets after swaps so we can access original Sample_ID/E_Sample_ID
+    ## pairs and evaluate the results of the label correction algorithm
+    reordered_elist$origs$targets_orig <- reordered_elist$targets
 
     return(reordered_elist)
 }
-
-mislabel_handlers <- list(
-    ignore = identity,
-    all_remove = function(elist) {
-        return(elist[, !elist$targets$Mislabeled])
-    },
-    all_correct = function(elist) {
-        ## This should just recover the original elist with no mislabeling
-        return(reorder_elist_samples(elist, elist$targets$Sample_ID))
-    },
-    majority_remove = function(elist) {
-        ## For each subject, if there isn't a majority consensus among the samples
-        ## remove all samples for that subject
-        sample_mislabel_table <- elist$targets %>%
-            group_by(Subject_ID) %>% 
-            mutate(
-                Subject_Pct_Mislabeled = mean(Mislabeled)
-            ) %>% ungroup() %>% 
-            mutate(
-                Consensus = Subject_Pct_Mislabeled < 0.5
-            )
-        return(elist[, sample_mislabel_table$Consensus])
-    },
-    majority_correct = function(elist) {
-        ## For each mislabeled sample, if the majority of samples from the same subject are correctly
-        ## labeled, then assume we can fix the mislabel
-        sample_mislabel_table <- elist$targets %>%
-            group_by(Subject_ID) %>%
-            mutate(
-                Subject_Pct_Mislabeled = mean(Mislabeled),
-            ) %>% ungroup() %>%
-            mutate(
-                Correctable = Mislabeled & Subject_Pct_Mislabeled < 0.5,
-                Relabeled_Samples = ifelse(Correctable, Sample_ID, E_Data)
-            )
-        return(reorder_elist_samples(elist, sample_mislabel_table$Relabeled_Samples))
-    },
-    majority_correct_and_remove = function(elist) {
-        elist <- mislabel_handlers$majority_correct(elist)
-        elist <- mislabel_handlers$majority_remove(elist)
-        return(elist)
-    }
-)
-handle_mislabels_options <- names(mislabel_handlers)
 
 ## Function to generate simulated data, run the real time learner,
 ## and save the resulting model
@@ -440,6 +458,34 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
     
     elist <- handle_mislabels_function(elist)
     
+    tt <- elist$genes %>% 
+        as_tibble %>% 
+        mutate(logFC = NA_real_, AveExpr = NA_real_, t = NA_real_, P.Value = NA_real_, adj.P.Val = NA_real_)
+    
+    label_outcomes <- elist$orig$targets_orig %>%
+        select( Sample_ID, E_Sample_ID, Mislabeled ) %>% 
+        ## Need to specify dplyr rename or for some reason it fails in future_Map
+        dplyr::rename(
+            E_Sample_ID_orig = E_Sample_ID,
+            Mislabeled_orig = Mislabeled
+        ) %>% 
+        left_join(
+            elist$targets[, c("Sample_ID", "E_Sample_ID", "Mislabeled")],
+            by = "Sample_ID"
+        ) %>% dplyr::rename(
+            E_Sample_ID_final = E_Sample_ID,
+            Mislabeled_final = Mislabeled
+        ) %>%
+        mutate(
+            Outcome = case_when(
+                is.na(E_Sample_ID_final) ~ "removed",
+                E_Sample_ID_final == E_Sample_ID_orig ~ "ignored",
+                !Mislabeled_final ~ "correctly relabeled",
+                Mislabeled_final ~ "incorrectly relabeled",
+                .default = NA
+            )
+        ) %>% select( Sample_ID, Mislabeled_orig, Outcome )
+    
     unique_var_values <- lapply(elist$targets[, c("Status", "Sex", "Age")],
         function(var) {
             return(length(unique(var)))
@@ -447,10 +493,7 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
     if (ncol(elist) == 0 | any(unique_var_values < 2)) {
         ## If all samples are removed or if any variable has fewer than 2 unique values
         ## return a result table with all NA stats
-        tt <- elist$genes %>% 
-            as_tibble %>% 
-            mutate(logFC = NA_real_, AveExpr = NA_real_, t = NA_real_, P.Value = NA_real_, adj.P.Val = NA_real_)
-        return(tt)
+        return(list(tt = as_tibble(tt), label_outcomes = label_outcomes))
     }
     
     tsmsg("Running limma")
@@ -464,10 +507,7 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
     if (!design_is_identifiable(design)) {
         ## If the design is not identifiable due to nesting
         ## return a result table with all NA stats
-        tt <- elist$genes %>% 
-            as_tibble %>% 
-            mutate(logFC = NA_real_, AveExpr = NA_real_, t = NA_real_, P.Value = NA_real_, adj.P.Val = NA_real_)
-        return(tt)
+        return(list(tt = as_tibble(tt), label_outcomes = label_outcomes))
     }
     
     # If each subject has only one sample, then Subject_ID effect
@@ -485,16 +525,9 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
     }
     tt <- topTable(fit, number = Inf, coef = "StatusCase")
     
-    label_outcomes <- elist$other$targets_orig %>% 
-        select(Sample_ID, E_Data, Mislabeled) %>% 
-        rename(E_Data_init = E_Data) %>% 
-        mutate(
-            E_Data_final = elist$targets,
-            
-        )
-    
     tsmsg("Collecting results")
-    return(as_tibble(tt))
+    
+    return(list(tt = as_tibble(tt), label_outcomes = label_outcomes))
 }
 ```
 
@@ -549,28 +582,42 @@ if (file_exists("sim_results.qs")) {
     sim_result_table <- sim_table %>% 
         left_join(qread("sim_results.qs", nthreads = availableCores())) %>%
         # Fill in any NULL entries with "not run yet" errors
-        mutate(top_table = if_else(
-            sapply(top_table, is.null), 
-            list(try(stop("Simulation not run yet"), silent = TRUE)),
-            top_table
-        ))
+        mutate(
+            top_table = if_else(
+                sapply(top_table, is.null), 
+                list(try(stop("Simulation not run yet"), silent = TRUE)),
+                top_table),
+            label_outcomes = if_else(
+                sapply(label_outcomes, is.null),
+                list(try(stop("Simulation not run yet"), silent = TRUE)),
+                label_outcomes)
+        )
 } else {
     sim_result_table <- sim_table %>%
-        mutate(top_table = list(try(stop("Simulation not run yet"), silent = TRUE)))
+        mutate(
+            top_table = list(try(stop("Simulation not run yet"), silent = TRUE)),
+            label_outcomes = list(try(stop("Simulation not run yet"), silent = TRUE))
+        )
 }
 
 need_to_run <- sapply(sim_result_table$top_table, is, "try-error")
 if (any(need_to_run)) {
     tsmsg("Running ", sum(need_to_run), " simulations")
-    sim_result_table[need_to_run,] %<>% mutate(top_table = {
-        map_args <- list(f = function(...) try(run_sim(...), silent = FALSE))
-        map_args[sim_param_names] <- .[sim_param_names]
-        do.call(future_Map, map_args)
-    })
+    sim_result_table %<>% 
+        filter(need_to_run) %>% 
+        mutate(
+            results_list = {
+                map_args <- list(f = function(...) try(run_sim(...), silent = FALSE))
+                map_args[sim_param_names] <- .[sim_param_names]
+                do.call(future_Map, map_args)},
+            top_table = lapply(results_list, \(x) try(x$tt, silent = FALSE)),
+            label_outcomes = lapply(results_list, \(x) try(x$label_outcomes, silent = FALSE))
+        ) %>% select(-results_list)
     need_to_run <- sapply(sim_result_table$top_table, is, "try-error")
     assert_that(!any(need_to_run))
     qsave(sim_result_table, "sim_results.qs", nthreads = availableCores())
 }
+
 ```
 
 # Collect simulation results
@@ -578,7 +625,8 @@ if (any(need_to_run)) {
 ```{r}
 fdr_threshold <- 0.05
 
-sim_result_long_table <- sim_result_table %>%
+sim_result_long_tt_table <- sim_result_table %>% 
+    select(-label_outcomes) %>% 
     filter(sapply(top_table, is.data.frame)) %>%
     unnest(top_table) %>%
     mutate(
@@ -594,7 +642,7 @@ sim_result_long_table <- sim_result_table %>%
         ) %>% factor(levels = c("TP", "TN", "FP", "FN"))
     )
 
-sim_result_auc_table <- sim_result_long_table %>% 
+sim_result_auc_table <- sim_result_long_tt_table %>% 
     filter(!is.na(DE) & !is.na(adj.P.Val)) %>%
     group_by(pick(all_of(sim_param_names))) %>% 
     summarise(
@@ -605,7 +653,22 @@ sim_result_auc_table <- sim_result_long_table %>%
       .groups = "drop"
     )
 
-sim_result_perf_table <- sim_result_long_table %>%
+sim_result_label_outcomes_table <- sim_result_table %>% 
+    select(-top_table) %>% 
+    filter(sapply(label_outcomes, is.data.frame)) %>% 
+    unnest(label_outcomes) %>% 
+    group_by(pick(all_of(sim_param_names)), Mislabeled_orig, Outcome) %>% 
+    summarize( Num_Samples = n(), .groups = "drop" ) %>% 
+    mutate(
+        Mislabeled_orig = ifelse( Mislabeled_orig, "mislabels", "correct labels" )
+    ) %>% 
+    pivot_wider(
+        names_from = c("Mislabeled_orig", "Outcome"),
+        values_from = "Num_Samples",
+        values_fill = 0
+    )
+
+sim_result_perf_table <- sim_result_long_tt_table %>%
     filter(!is.na(Feature_Call)) %>%
     group_by(pick(all_of(sim_param_names)), Feature_Call) %>%
     summarise(Num_Genes = n(), .groups = "drop") %>%
@@ -623,7 +686,8 @@ sim_result_perf_table <- sim_result_long_table %>%
         Accuracy = (TP + TN) / n_features
     ) %>%
     full_join(sim_result_auc_table, by=sim_param_names, keep=FALSE) %>% 
-    mutate( 
+    full_join(sim_result_label_outcomes_table, by=sim_param_names, keep=FALSE) %>% 
+    mutate(
       ## This is assuming you sample without replacement when simulating swaps
       Pct_Swapped = 100 * n_swaps / (n_samples_per_subject * n_subjects_per_group),
       Swap_Type = if_else(swap_systematic, "Always swap case with control", "Swap pairs at random") %>% fct_inorder
@@ -669,6 +733,7 @@ sim_result_perf_summary_table <- sim_result_perf_table %>%
         Pct_Swapped = 100 * n_swaps / (n_samples_per_subject * n_subjects_per_group),
         Swap_Type = if_else(swap_systematic, "Always swap case with control", "Swap pairs at random") %>% fct_inorder 
     )
+
 ```
 
 # Plot results
@@ -824,7 +889,11 @@ ggplot(data=corr_timer_table, aes(x=n_features, y=corr_time)) +
 
 
 ```{r}
-params <- list(
+my_params <- as.list(sim_table[need_to_run, sim_param_names][1, ])
+elist_params <- my_params[names(my_params) != "handle_mislabels"]
+
+
+elist_params <- list(
   n_subjects_per_group = 10,
   n_samples_per_subject = 3,
   n_features = 5,
@@ -839,10 +908,9 @@ params <- list(
   sv_sd = 0.1,
   resid_sd = 0.1,
   seed = 1986)
+elist <- do.call(sim_mislabeled_data, elist_params)
 
-elist <- do.call(sim_mislabeled_data, params)
-
-tt <- do.call(run_sim, c(params, handle_mislabels="majority"))
+results_list <- do.call(run_sim, c(my_params))
 
 test_auc_conditions_list <- as.list(sim_result_long_table[1,sim_param_names])
 test_auc_table <- sim_result_long_table %>% 
