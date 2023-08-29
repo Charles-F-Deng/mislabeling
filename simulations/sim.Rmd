@@ -65,7 +65,7 @@ reorder_elist_samples <- function(elist, sample_ids) {
     colnames(reordered_elist) <- colnames(elist)
     reordered_elist$targets %<>% mutate(
         E_Sample_ID = sample_ids,
-        E_Subject_ID = lapply(sample_ids, \(x) str_split_1(x, "_")[1]),
+        E_Subject_ID = str_extract(sample_ids, rex(start, not("_"))),
         Mislabeled = !(Sample_ID == E_Sample_ID)
     )
     return(reordered_elist)
@@ -186,7 +186,7 @@ local({
     n_subjects_per_group = 10
     n_samples_per_subject = 3
     n_features = 2
-    n_swaps = 10
+    n_mislabels = 10
     swap_systematic = FALSE
     n_sv = 2
     fraction_de_case = 0.5
@@ -203,7 +203,7 @@ sim_mislabeled_data <- function (
     n_subjects_per_group,
     n_samples_per_subject,
     n_features,
-    n_swaps,
+    n_mislabels,
     swap_systematic,
     n_sv,
     fraction_de_case,
@@ -220,7 +220,7 @@ sim_mislabeled_data <- function (
             "n_subjects_per_group",
             "n_samples_per_subject",
             "n_features",
-            "n_swaps",
+            "n_mislabels",
             "swap_systematic",
             "n_sv",
             "fraction_de_case",
@@ -243,8 +243,8 @@ sim_mislabeled_data <- function (
         n_subjects_per_group > 1,
         n_samples_per_subject > 0,
         n_features > 0,
-        n_swaps >= 0,
-        n_swaps <= n_samples/2,
+        n_mislabels >= 0 & n_mislabels != 1,
+        n_mislabels <= n_samples,
         is.logical(swap_systematic),
         n_sv >= 0,
         fraction_de_case >= 0,
@@ -368,7 +368,7 @@ sim_mislabeled_data <- function (
             "n_subjects_per_group",
             "n_samples_per_subject",
             "n_features",
-            "n_swaps",
+            "n_mislabels",
             "swap_systematic",
             "n_sv",
             "fraction_de_case",
@@ -403,16 +403,16 @@ sim_mislabeled_data <- function (
   
     ## Apply dimnames to all relevant sub-elements in the EList
     dimnames(elist) <- dimnames(elist)
-       
-    ## TODO: add swapping with replacement 
+    
+    n_swaps_temp <- floor(n_mislabels / 2)
     ## Generate swaps
     if (swap_systematic) {
         swaps <- cbind(
-            sample(ctrl_samples, n_swaps),
-            sample(case_samples, n_swaps)
+            sample(ctrl_samples, n_swaps_temp),
+            sample(case_samples, n_swaps_temp)
         )
     } else {
-        swaps <- matrix(sample(sample_meta_table$Sample_ID, n_swaps * 2), ncol = 2)
+        swaps <- matrix(sample(sample_meta_table$Sample_ID, n_swaps_temp * 2), ncol = 2)
     }
     swap_from <- match(swaps[,1], sample_meta_table$Sample_ID)
     swap_to <- match(swaps[,2], sample_meta_table$Sample_ID)
@@ -423,8 +423,8 @@ sim_mislabeled_data <- function (
     ## Apply swaps to expression matrix thus generating mislabeled samples
     reordered_elist <- reorder_elist_samples(elist, swap_sample_ids)
     
-    ## Store targets after swaps so we can access original Sample_ID/E_Sample_ID
-    ## pairs and evaluate the results of the label correction algorithm
+    ## Store original targets so we can access initial Sample_ID/E_Data 
+    ## pairs to assess the results of the label correction algorithm
     reordered_elist$origs$targets_orig <- reordered_elist$targets
 
     return(reordered_elist)
@@ -462,7 +462,7 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
         as_tibble %>% 
         mutate(logFC = NA_real_, AveExpr = NA_real_, t = NA_real_, P.Value = NA_real_, adj.P.Val = NA_real_)
     
-    label_outcomes <- elist$orig$targets_orig %>%
+    label_outcomes <- elist$origs$targets_orig %>%
         select( Sample_ID, E_Sample_ID, Mislabeled ) %>% 
         ## Need to specify dplyr rename or for some reason it fails in future_Map
         dplyr::rename(
@@ -537,7 +537,7 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
 ## TODO: nonlinear time effect - time splines
 grid_list <- list(
     tibble(handle_mislabels = fct_inorder(eval(formals(run_sim)$handle_mislabels))),
-    tibble(n_swaps = seq(from = 0, to = 150, by = 15)),
+    tibble(n_mislabels = seq(from = 0, to = 300, by = 30)),
     tibble(swap_systematic = c(FALSE, TRUE)),
     ## Not varying any of these
     tibble(
@@ -555,13 +555,13 @@ grid_list <- list(
     ),
     ## Run each simulation 31 times with different seeds
     #tibble(seed = seq(from = 1986, length.out = 31))
-    tibble(seed = seq(from = 1986, length.out = 2))
+    tibble(seed = seq(from = 1986, length.out = 10))
 )
 sim_param_names <- sort(unlist(sapply(grid_list, colnames)))
 sim_table <- grid_list %>%
     Reduce(f = cross_join) %>%
     distinct %>%
-    filter(!(handle_mislabels == "remove" & n_swaps >= n_subjects_per_group * n_samples_per_subject)) %>%
+    filter(!(handle_mislabels == "remove" & n_mislabels >= 2 * n_subjects_per_group * n_samples_per_subject)) %>%
     arrange(seed)
 sim_table
 ```
@@ -689,7 +689,7 @@ sim_result_perf_table <- sim_result_long_tt_table %>%
     full_join(sim_result_label_outcomes_table, by=sim_param_names, keep=FALSE) %>% 
     mutate(
       ## This is assuming you sample without replacement when simulating swaps
-      Pct_Swapped = 100 * n_swaps / (n_samples_per_subject * n_subjects_per_group),
+      Pct_Swapped = 100 * n_mislabels / (2 * n_samples_per_subject * n_subjects_per_group),
       Swap_Type = if_else(swap_systematic, "Always swap case with control", "Swap pairs at random") %>% fct_inorder
     )
 
@@ -730,7 +730,7 @@ sim_result_perf_summary_table <- sim_result_perf_table %>%
     ) %>%
     mutate(
         ## This is assuming you sample without replacement when simulating swaps
-        Pct_Swapped = 100 * n_swaps / (n_samples_per_subject * n_subjects_per_group),
+        Pct_Swapped = 100 * n_mislabels / (2 * n_samples_per_subject * n_subjects_per_group),
         Swap_Type = if_else(swap_systematic, "Always swap case with control", "Swap pairs at random") %>% fct_inorder 
     )
 
@@ -791,7 +791,7 @@ with_pdf("sim_errbar.pdf", print(p), width = 8, height = 3 * length(perf_include
 
 perf_boxplots <- lapply(
     perf_names,
-    \(pn) ggplot(sim_result_perf_table %>% filter(n_swaps %% 10 == 0)) +
+    \(pn) ggplot(sim_result_perf_table %>% filter(n_mislabels %% 10 == 0)) +
         aes(
             x = Pct_Swapped,
             color = handle_mislabels,
@@ -897,7 +897,7 @@ elist_params <- list(
   n_subjects_per_group = 10,
   n_samples_per_subject = 3,
   n_features = 5,
-  n_swaps = 10,
+  n_mislabels = 20,
   swap_systematic = FALSE,
   n_sv = 5,
   fraction_de_case = 0.5,
