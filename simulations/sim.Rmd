@@ -146,6 +146,34 @@ swap_handlers <- list(
 )
 handle_swaps_options <- names(swap_handlers)
 
+detect_cycles <- function(elist) {
+    mislabeled_elist <- elist$targets %>% filter(Mislabeled) %>% select(Sample_ID, E_Sample_ID)
+    cycle_list <- vector("list", nrow(mislabeled_elist))
+    i <- 1
+    while (nrow(mislabeled_elist) > 0) {
+        ## Start with first mislabeled Sample_ID
+        curr_sample_id <- mislabeled_elist[1, "Sample_ID"]
+        cycle <- c(curr_sample_id)
+        while (TRUE) {
+            next_sample_id <- mislabeled_elist[curr_sample_id, "E_Sample_ID"]
+            ## The stop condition is if we've returned to the head of the current cycle
+            if (next_sample_id == cycle[[1]]) {
+                break
+            } else {
+                cycle <- c(cycle, next_sample_id)
+                curr_sample_id <- next_sample_id
+            }
+        }
+        cycle_list[[i]] <- cycle
+        ## Filter out all the samples that were detected as part of this cycle
+        mislabeled_elist <- mislabeled_elist %>% filter(!(Sample_ID %in% cycle))
+        i <- i + 1
+    }
+    ## Filter out unused indices
+    cycle_list <- cycle_list[!sapply(cycle_list,is.null)]
+    return(cycle_list)
+}
+
 mislabel_handlers <- list(
     ignore = identity,
     all_remove = function(elist) {
