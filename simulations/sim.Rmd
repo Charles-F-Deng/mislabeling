@@ -87,6 +87,30 @@ swap_elist_samples <- function(elist, swaps) {
     return(reorder_elist_samples(elist, sample_ids))
 }
 
+swap_handlers <- list(
+    random = function(elist, n_mislabels) {
+        correct_ctrl_samples <- elist$targets %>% filter(Status == "Control" & !Mislabeled) %>% pull(Sample_ID)
+        correct_case_samples <- elist$targets %>% filter(Status == "Case" & !Mislabeled) %>% pull(Sample_ID)
+        n_swaps <- floor(n_mislabels / 2)
+        swaps <- cbind(
+            sample(correct_ctrl_samples, n_swaps),
+            sample(correct_case_samples, n_swaps)
+        )
+        ## Apply swaps to expression matrix thus generating mislabeled samples
+        return(swap_elist_samples(elist, swaps))
+    },
+    systematic = function(elist, n_mislabels) {
+        correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
+        n_swaps <- floor(n_mislabels / 2)
+        swaps <- cbind(
+            swaps <- matrix(sample(correct_samples, n_swaps * 2), ncol = 2)
+        )
+        ## Apply swaps to expression matrix thus generating mislabeled samples
+        return(swap_elist_samples(elist, swaps))
+    }
+)
+handle_swaps_options <- names(swap_handlers)
+
 mislabel_handlers <- list(
     ignore = identity,
     all_remove = function(elist) {
@@ -199,7 +223,7 @@ sim_mislabeled_data <- function (
     resid_sd,
     sex_sd = 0,
     age_sd = 0,
-    swap_model = c("systematic", "random"),
+    swap_model = handle_swaps_options,
     seed
 ) {
     if (!missing(seed)) {
@@ -226,6 +250,13 @@ sim_mislabeled_data <- function (
     n_samples_per_group <- n_subjects_per_group * n_samples_per_subject
     n_samples <- 2 * n_samples_per_group
     
+    swap_model <- as.character(swap_model)
+    swap_model <- match.arg(swap_model)
+    if (swap_model %in% c("random", "systematic") & n_mislabels %% 2 == 1) {
+        warning(glue("For random and systematic modes, n_mislabels must be even. Setting n_mislabels to be {2 * floor(n_mislabels / 2)}"))
+        n_mislabels <- 2 * floor(n_mislabels / 2)
+    }
+    
     assert_that(
         n_subjects_per_group > 1,
         n_samples_per_subject > 0,
@@ -241,7 +272,7 @@ sim_mislabeled_data <- function (
         resid_sd >= 0,
         sex_sd >= 0,
         age_sd >= 0,
-        swap_model %in% c("systematic", "random")
+        swap_model %in% handle_swaps_options
     )
     if (n_sv < 1 && sv_sd > 0) {
         warning("Setting SV signal to zero since there are not SVs")
@@ -280,9 +311,6 @@ sim_mislabeled_data <- function (
             E_Subject_ID = Subject_ID
         ) %>% 
         relocate(Sample_ID)
-    
-    ctrl_samples <- sample_meta_table %>% filter(Status == "Control") %>% pull(Sample_ID)
-    case_samples <- sample_meta_table %>% filter(Status == "Case") %>% pull(Sample_ID)
     
     assert_that(length(unique(sample_meta_table$Sex)) > 1, msg = "Only one sex simulated")
     
@@ -391,20 +419,31 @@ sim_mislabeled_data <- function (
     ## Apply dimnames to all relevant sub-elements in the EList
     dimnames(elist) <- dimnames(elist)
     
-    n_swaps_temp <- floor(n_mislabels / 2)
+    ## Create mislabeled samples
+    tsmsg("Swapping samples with method: {swap_model}")
+    handle_swaps_function <- swap_handlers[[swap_model]]
+    
+    # reordered_elist <- handle_swaps_function(elist, n_mislabels)
     
     ## Generate swaps
-    if (swap_model == "systematic") {
+    if (swap_model == "random") {
+        correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
+        n_swaps <- floor(n_mislabels / 2)
         swaps <- cbind(
-            sample(ctrl_samples, n_swaps_temp),
-            sample(case_samples, n_swaps_temp)
+            swaps <- matrix(sample(correct_samples, n_swaps * 2), ncol = 2)
         )
-    } else if (swap_model == "random") {
-        swaps <- matrix(sample(sample_meta_table$Sample_ID, n_swaps_temp * 2), ncol = 2)
+    } else if (swap_model == "systematic") {
+        correct_ctrl_samples <- elist$targets %>% filter(Status == "Control" & !Mislabeled) %>% pull(Sample_ID)
+        correct_case_samples <- elist$targets %>% filter(Status == "Case" & !Mislabeled) %>% pull(Sample_ID)
+        n_swaps <- floor(n_mislabels / 2)
+        swaps <- cbind(
+            sample(correct_ctrl_samples, n_swaps),
+            sample(correct_case_samples, n_swaps)
+        )
     }
     ## Apply swaps to expression matrix thus generating mislabeled samples
     reordered_elist <- swap_elist_samples(elist, swaps)
-    
+
     ## Store original targets so we can access initial Sample_ID/E_Data 
     ## pairs to assess the results of the label correction algorithm
     reordered_elist$origs$targets_orig <- reordered_elist$targets
@@ -518,9 +557,9 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
 ```{r}
 ## TODO: nonlinear time effect - time splines
 grid_list <- list(
-    tibble(handle_mislabels = fct_inorder(eval(formals(run_sim)$handle_mislabels))),
-    tibble(n_mislabels = seq(from = 0, to = 30, by = 30)),
-    tibble(swap_model = c("systematic", "random")),
+    tibble(handle_mislabels = handle_mislabels_options),
+    tibble(n_mislabels = seq(from = 0, to = 300, by = 30)),
+    tibble(swap_model = handle_swaps_options),
     ## Not varying any of these
     tibble(
         n_subjects_per_group = 30,
@@ -537,7 +576,7 @@ grid_list <- list(
     ),
     ## Run each simulation 31 times with different seeds
     #tibble(seed = seq(from = 1986, length.out = 31))
-    tibble(seed = seq(from = 1986, length.out = 1))
+    tibble(seed = seq(from = 1986, length.out = 10))
 )
 sim_param_names <- sort(unlist(sapply(grid_list, colnames)))
 sim_table <- grid_list %>%
@@ -881,7 +920,6 @@ elist_params <- list(
   n_samples_per_subject = 3,
   n_features = 5,
   n_mislabels = 20,
-  swap_systematic = FALSE,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -890,6 +928,7 @@ elist_params <- list(
   age_sd = 0.1,
   sv_sd = 0.1,
   resid_sd = 0.1,
+  swap_model = "random",
   seed = 1986)
 elist <- do.call(sim_mislabeled_data, elist_params)
 
