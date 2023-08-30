@@ -79,8 +79,8 @@ swap_elist_samples <- function(elist, swaps) {
     for (row in seq_len(nrow(swaps))) {
         sample1 <- swaps[row, 1]
         sample2 <- swaps[row, 2]
-        index1 <- match(sample1, elist$targets$E_Sample_ID)
-        index2 <- match(sample2, elist$targets$E_Sample_ID)
+        index1 <- match(sample1, sample_ids)
+        index2 <- match(sample2, sample_ids)
         sample_ids[index1] = sample2
         sample_ids[index2] = sample1
     }
@@ -98,6 +98,41 @@ swap_handlers <- list(
         )
         ## Apply swaps to expression matrix thus generating mislabeled samples
         return(swap_elist_samples(elist, swaps))
+    },
+    random_with_replacement = function(elist, n_mislabels) {
+        n_correct_labels <- nrow(elist$targets %>% filter(!Mislabeled))
+        assert_that(n_mislabels <= n_correct_labels, 
+                    msg = glue("Can't generate {n_mislabels} new mislabels when there are only {n_correct_samples} correctly labeled samples"))
+        n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
+        n_goal_mislabels <- n_curr_mislabels + n_mislabels
+        n_rounds <- 0
+        while (n_curr_mislabels < n_goal_mislabels) {
+            n_new_mislabels <- n_goal_mislabels - n_curr_mislabels
+            mislabeled_samples <- elist$targets %>% filter(Mislabeled) %>% pull(Sample_ID)
+            correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
+            all_samples <- c(mislabeled_samples, correct_samples)
+            if (n_new_mislabels == 1) {
+                swaps <- cbind(
+                    sample(mislabeled_samples, 1),
+                    sample(correct_samples, 1)
+                )
+            } else if (n_new_mislabels == 2) {
+                swaps <- matrix(sample(correct_samples, 2), ncol = 2)
+            } else if (n_rounds > 5) {
+                swaps <- cbind(
+                    sample(mislabeled_samples, n_new_mislabels),
+                    sample(correct_samples, n_new_mislabels)
+                )
+            } else {
+                n_swaps <- floor(n_new_mislabels / 2)
+                swaps <- matrix(sample(all_samples, 2 * n_swaps, replace = TRUE), ncol = 2)
+            }
+            ## Apply swaps to expression matrix thus generating mislabeled samples
+            elist <- swap_elist_samples(elist, swaps)
+            n_rounds <- n_rounds + 1
+            n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
+        }
+        return(elist)
     },
     systematic = function(elist, n_mislabels) {
         correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
@@ -420,7 +455,7 @@ sim_mislabeled_data <- function (
     dimnames(elist) <- dimnames(elist)
     
     ## Create mislabeled samples
-    tsmsg("Swapping samples with method: {swap_model}")
+    tsmsg(glue("Swapping samples with method: {swap_model}"))
     handle_swaps_function <- swap_handlers[[swap_model]]
     
     # reordered_elist <- handle_swaps_function(elist, n_mislabels)
@@ -432,6 +467,8 @@ sim_mislabeled_data <- function (
         swaps <- cbind(
             swaps <- matrix(sample(correct_samples, n_swaps * 2), ncol = 2)
         )
+        ## Apply swaps to expression matrix thus generating mislabeled samples
+        elist <- swap_elist_samples(elist, swaps)
     } else if (swap_model == "systematic") {
         correct_ctrl_samples <- elist$targets %>% filter(Status == "Control" & !Mislabeled) %>% pull(Sample_ID)
         correct_case_samples <- elist$targets %>% filter(Status == "Case" & !Mislabeled) %>% pull(Sample_ID)
@@ -440,15 +477,48 @@ sim_mislabeled_data <- function (
             sample(correct_ctrl_samples, n_swaps),
             sample(correct_case_samples, n_swaps)
         )
+        ## Apply swaps to expression matrix thus generating mislabeled samples
+        elist <- swap_elist_samples(elist, swaps)
+    } else if (swap_model == "random_with_replacement") {
+        n_correct_labels <- nrow(elist$targets %>% filter(!Mislabeled))
+        assert_that(n_mislabels <= n_correct_labels, 
+               msg = glue("Can't generate {n_mislabels} new mislabels when there are only {n_correct_samples} correctly labeled samples"))
+        n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
+        n_goal_mislabels <- n_curr_mislabels + n_mislabels
+        n_rounds <- 0
+        while (n_curr_mislabels < n_goal_mislabels) {
+            n_new_mislabels <- n_goal_mislabels - n_curr_mislabels
+            mislabeled_samples <- elist$targets %>% filter(Mislabeled) %>% pull(Sample_ID)
+            correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
+            all_samples <- c(mislabeled_samples, correct_samples)
+            if (n_new_mislabels == 1) {
+                swaps <- cbind(
+                    sample(mislabeled_samples, 1),
+                    sample(correct_samples, 1)
+                )
+            } else if (n_new_mislabels == 2) {
+                swaps <- matrix(sample(correct_samples, 2), ncol = 2)
+            } else if (n_rounds > 5) {
+                swaps <- cbind(
+                    sample(mislabeled_samples, n_new_mislabels),
+                    sample(correct_samples, n_new_mislabels)
+                )
+            } else {
+                n_swaps <- floor(n_new_mislabels / 2)
+                swaps <- matrix(sample(all_samples, 2 * n_swaps, replace = TRUE), ncol = 2)
+            }
+            ## Apply swaps to expression matrix thus generating mislabeled samples
+            elist <- swap_elist_samples(elist, swaps)
+            n_rounds <- n_rounds + 1
+            n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
+        }
     }
-    ## Apply swaps to expression matrix thus generating mislabeled samples
-    reordered_elist <- swap_elist_samples(elist, swaps)
 
     ## Store original targets so we can access initial Sample_ID/E_Data 
     ## pairs to assess the results of the label correction algorithm
-    reordered_elist$origs$targets_orig <- reordered_elist$targets
+    elist$origs$targets_orig <- elist$targets
 
-    return(reordered_elist)
+    return(elist)
 }
 
 ## Function to generate simulated data, run the real time learner,
@@ -711,7 +781,6 @@ sim_result_perf_table <- sim_result_long_tt_table %>%
     mutate(
       ## This is assuming you sample without replacement when simulating swaps
       Pct_Swapped = 100 * n_mislabels / (2 * n_samples_per_subject * n_subjects_per_group),
-      ## TODO
       Swap_Type = swap_model
     )
 
@@ -762,7 +831,7 @@ sim_result_perf_summary_table <- sim_result_perf_table %>%
 
 ## Error bar plots
 
-```{r fig.height=9, fig.width=8}
+```{r fig.height=9, fig.width=12}
 make_y_aes <- \(measure) aes_string(
     y = glue("{measure}_mean"),
     ymin = glue("{measure}_mean - {measure}_se"),
@@ -809,7 +878,7 @@ with_pdf("sim_errbar.pdf", print(p), width = 8, height = 3 * length(perf_include
 
 ## Boxplots
 
-```{r fig.height=9, fig.width=8}
+```{r fig.height=9, fig.width=12}
 
 perf_boxplots <- lapply(
     perf_names,
@@ -914,12 +983,11 @@ ggplot(data=corr_timer_table, aes(x=n_features, y=corr_time)) +
 my_params <- as.list(sim_table[need_to_run, sim_param_names][1, ])
 elist_params <- my_params[names(my_params) != "handle_mislabels"]
 
-
 elist_params <- list(
-  n_subjects_per_group = 10,
+  n_subjects_per_group = 50,
   n_samples_per_subject = 3,
   n_features = 5,
-  n_mislabels = 20,
+  n_mislabels = 300,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -928,9 +996,13 @@ elist_params <- list(
   age_sd = 0.1,
   sv_sd = 0.1,
   resid_sd = 0.1,
-  swap_model = "random",
+  swap_model = "random_with_replacement",
   seed = 1986)
 elist <- do.call(sim_mislabeled_data, elist_params)
+
+sim_params <- elist_params
+sim_params$handle_mislabels <- "all_remove"
+results_list <- do.call(run_sim, sim_params)
 
 results_list <- do.call(run_sim, c(my_params))
 
