@@ -488,7 +488,7 @@ sim_mislabeled_data <- function (
     
     # reordered_elist <- handle_swaps_function(elist, n_mislabels)
     
-    ## Generate swaps
+    # Generate swaps
     if (swap_model == "random") {
         correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
         n_swaps <- floor(n_mislabels / 2)
@@ -509,7 +509,7 @@ sim_mislabeled_data <- function (
         elist <- swap_elist_samples(elist, swaps)
     } else if (swap_model == "random_with_replacement") {
         n_correct_labels <- nrow(elist$targets %>% filter(!Mislabeled))
-        assert_that(n_mislabels <= n_correct_labels, 
+        assert_that(n_mislabels <= n_correct_labels,
                msg = glue("Can't generate {n_mislabels} new mislabels when there are only {n_correct_samples} correctly labeled samples"))
         n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
         n_goal_mislabels <- n_curr_mislabels + n_mislabels
@@ -656,7 +656,7 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
 ## TODO: nonlinear time effect - time splines
 grid_list <- list(
     tibble(handle_mislabels = handle_mislabels_options),
-    tibble(n_mislabels = seq(from = 0, to = 300, by = 30)),
+    tibble(n_mislabels = seq(from = 0, to = 30, by = 30)),
     tibble(swap_model = handle_swaps_options),
     ## Not varying any of these
     tibble(
@@ -674,7 +674,7 @@ grid_list <- list(
     ),
     ## Run each simulation 31 times with different seeds
     #tibble(seed = seq(from = 1986, length.out = 31))
-    tibble(seed = seq(from = 1986, length.out = 10))
+    tibble(seed = seq(from = 1986, length.out = 2))
 )
 sim_param_names <- sort(unlist(sapply(grid_list, colnames)))
 sim_table <- grid_list %>%
@@ -954,58 +954,7 @@ print(boxp)
 
 # Charles - playing around with code
 
-```{r}
-
-my_table <- sim_result_long_table %>% 
-  filter(
-    handle_mislabels == "ignore",
-    n_swaps == 120,
-    swap_systematic,
-    seed == 1986
-  ) %>% select(DE, Called_DE, adj.P.Val)
-
-```
-
-
-```{r}
-
-corr_timer_function <- function(n_features) {
-    start <- Sys.time()
-    params <- list(
-      n_subjects_per_group = 50,
-      n_samples_per_subject = 3,
-      #n_features = 200,
-      n_swaps = 20,
-      swap_systematic = FALSE,
-      n_sv = 5,
-      fraction_de_case = 0.5,
-      case_sd = 0.1,
-      subject_sd = 0.1,
-      sex_sd = 0.1,
-      age_sd = 0.1,
-      sv_sd = 0.1,
-      resid_sd = 0.1,
-      seed = 1986)
-    elist <- do.call(sim_mislabeled_data, c(params, n_features=n_features))
-    sv_names <- str_subset(colnames(elist$targets), "^SV[0-9]+")
-    design_formula <- as.formula(str_c(c("~1", "Status", "Sex", "Age", sv_names), collapse = "+"))
-    design <- model.matrix(design_formula, elist$targets)
-    dupcor <- duplicateCorrelation(elist, design, block = elist$targets$Subject_ID)
-    end <- Sys.time()
-    return(as.numeric(end - start))
-}
-
-corr_timer_table <- data.frame(
-  n_features = seq.int(10, 100, by=10)
-)
-corr_timer_table$corr_time <- sapply(corr_timer_table$n_features, corr_timer_function)
-
-ggplot(data=corr_timer_table, aes(x=n_features, y=corr_time)) +
-  geom_line() + geom_point()
-
-```
-
-
+## Debugging
 
 ```{r}
 my_params <- as.list(sim_table[need_to_run, sim_param_names][1, ])
@@ -1053,68 +1002,12 @@ test_auc_table <- sim_result_long_table %>%
       sv_sd == 0,
       !swap_systematic
   )
-
 ```
-
-
-## Switching labels vs data
 
 ```{r}
-# 1. Set seed, create elist and scramble targets but not data
-# 2. With same seed as #1, create elist but now scramble data and not targets
-# 3. 
 
-library("clipr")
 
-params <- list(
-  n_samples_per_group = 50,
-  n_features <- 10000,
-  n_swaps = 10,
-  swap_systematic = TRUE,
-  n_sv = 5,
-  fraction_de_case = 0.5,
-  case_sd = 0.1,
-  sv_sd = 0.1,
-  resid_sd = 0.1,
-  seed = 1986)
-
-# Scramble targets but not data
-params1 <- c(params, reorder_data=FALSE, reorder_targets=TRUE)
-elist1 <- do.call(sim_mislabeled_data, params1)
-
-# Scramble data but not targets
-params2 <- c(params, reorder_data=TRUE, reorder_targets=FALSE)
-elist2 <- do.call(sim_mislabeled_data, params2)
-
-clipr::write_clip(elist1$targets)
-clipr::write_clip(elist2$targets)
-
-# Check that the set of mislabeled samples is the same in both instances (the seed worked)
-swapped_samples1 <- sort(filter(elist1$targets, Mislabeled==TRUE)$Sample_ID)
-swapped_samples2 <- sort(filter(elist2$targets, Mislabeled==TRUE)$Sample_ID)
-assert_that(identical(swapped_samples1, swapped_samples2), msg="The two simulations have different sample swaps")
-
-# Check that the simulated SV values are identical
-# What is the equivalent of [x for x in my_list if x[:2]=="SV"]
-sv_cols <- c("SV1", "SV2", "SV3", "SV4", "SV5")
-sv_diff <- elist1$targets[elist2$targets$swap_index, sv_cols] - elist2$targets[, sv_cols]
-sv_checksum <- sum(abs(targets_diff))
-assert_that(sv_checksum == 0, msg="The two simulations generated different SV values")
-
-# Check that the simulated expressions are identical
-elist_diff <- elist1$E[,colnames(elist2$E)] - elist2$E
-elist_checksum <- sum(abs(elist_diff))
-assert_that(elist_checksum == 0, msg="THe two simulations generated different E values")
-
-# Check that the lm results are identical for all three mislabeling treatment options
-tdiff <- list()
-for (handle_method in eval(formals(run_sim)$handle_mislabels)) {
-  results1 <- do.call(run_sim, c(params1, handle_mislabels=handle_method))
-  results1 <- results1[order(results1$Feature_ID), ]
-  results2 <- do.call(run_sim, c(params2, handle_mislabels=handle_method))
-  results2 <- results2[order(results2$Feature_ID), ]
-  tdiff[[handle_method]] <- results1$t - results2$t
-}
 
 ```
+
 
