@@ -276,13 +276,16 @@ get_potential_relabels_list <- function(elist) {
 }
 
 mislabel_handlers <- list(
-    ignore = identity,
+    all_ignore = identity,
     all_remove = function(elist) {
         return(elist[, !elist$targets$Mislabeled])
     },
     all_correct = function(elist) {
         ## This should just recover the original elist with no mislabeling
         return(reorder_elist_samples(elist, elist$targets$Sample_ID))
+    },
+    greedy_search = function(elist) {
+        potential_relabels_list <- get_potential_relabels_list(elist)
     },
     majority_remove = function(elist) {
         ## Remove all samples where the labeled Subject_ID doesn't match the 
@@ -337,6 +340,21 @@ mislabel_handlers <- list(
                 break
             }
             
+            ## There should be no ambiguities as those are filtered out in get_potential_relabels_list
+            ## This fails sometimes refer to excel sheet - for testing purposes just detect it and break out
+            if (nrow(
+                    cycle_tree %>%
+                        group_by(cycle_head) %>% 
+                        filter(n() > 1)
+                ) > 0) {break}
+            assert_that(
+                nrow(
+                    cycle_tree %>%
+                        group_by(cycle_head) %>% 
+                        filter(n() > 1)
+                ) == 0,
+                msg = "Detected distinct cycles that return to the same head sample"
+            )
             assert_that(all(cycle_tree$cycle_size > 1), msg = "Detected cycles of size < 2")
             
             relabels <- cycle_tree %>% 
@@ -353,12 +371,12 @@ mislabel_handlers <- list(
             elist <- relabel_elist_samples(elist, relabels)
         }
         return(elist)
+    },
+    majority_cycles_correct_and_remove = function(elist, max_cycle_size = 8) {
+        elist <- mislabel_handlers$majority_cycles_correct(elist, max_cycle_size)
+        elist <- mislabel_handlers$majority_remove(elist)
+        return(elist)
     }
-    # majority_cycles_correct_and_remove(elist, max_cycle_size = 8) {
-    #     elist <- majority_cycles_correct(elist)
-    #     elist <- majority_remove(elist)
-    #     return(elist)
-    # }
 )
 handle_mislabels_options <- names(mislabel_handlers)
 ```
@@ -761,8 +779,8 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
             Outcome = case_when(
                 is.na(E_Sample_ID_final) ~ "removed",
                 E_Sample_ID_final == E_Sample_ID_orig ~ "ignored",
-                !Mislabeled_final ~ "correctly relabeled",
-                Mislabeled_final ~ "incorrectly relabeled",
+                !Mislabeled_final ~ "correctly_relabeled",
+                Mislabeled_final ~ "incorrectly_relabeled",
                 .default = NA
             )
         ) %>% select( Sample_ID, Mislabeled_orig, Outcome )
@@ -818,13 +836,13 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
 ## TODO: nonlinear time effect - time splines
 grid_list <- list(
     tibble(handle_mislabels = handle_mislabels_options),
-    tibble(n_mislabels = seq(from = 0, to = 40, by = 10)),
+    tibble(n_mislabels = seq(from = 0, to = 300, by = 10)),
     tibble(swap_model = handle_swaps_options),
     ## Not varying any of these
     tibble(
         n_subjects_per_group = 30,
         n_samples_per_subject = 5,
-        n_features = 100,
+        n_features = 1000,
         n_sv = 5,
         fraction_de_case = 0.5,
         case_sd = 0.1,
@@ -836,7 +854,7 @@ grid_list <- list(
     ),
     ## Run each simulation 31 times with different seeds
     #tibble(seed = seq(from = 1986, length.out = 31))
-    tibble(seed = seq(from = 1986, length.out = 2))
+    tibble(seed = seq(from = 1986, length.out = 10))
 )
 sim_param_names <- sort(unlist(sapply(grid_list, colnames)))
 sim_table <- grid_list %>%
@@ -884,32 +902,17 @@ if (file_exists("sim_results.qs")) {
 ## To comment out once weird bug is fixed
 plan(sequential)
 need_to_run <- sapply(sim_result_table$top_table, is, "try-error")
-num_simulations <- sum(need_to_run)
-
-## Create progress bar
-pb <- progress_bar$new(
-  format = "[:bar] :percent | ETA: :eta",
-  total = num_simulations
-)
-
-run_sim_with_progress <- function(...) {
-    result <- try(run_sim(...), silent = FALSE)
-    pb$tick()
-    return(result)
-}
-
 if (any(need_to_run)) {
-    tsmsg("Running ", num_simulations, " simulations")
-    sim_result_table %<>% 
-        filter(need_to_run) %>% 
+    tsmsg("Running ", sum(need_to_run), " simulations")
+    sim_result_table[need_to_run, ] %<>% 
         mutate(
             results_list = {
-                map_args <- list(f = run_sim_with_progress)
+                map_args <- list(f = function(...) try(run_sim(...), silent = FALSE))
                 map_args[sim_param_names] <- .[sim_param_names]
                 do.call(future_Map, map_args)},
-            top_table = lapply(results_list, \(x) try(x$tt, silent = TRUE)),
-            label_outcomes = lapply(results_list, \(x) try(x$label_outcomes, silent = TRUE))
-        ) # %>% select(-results_list)
+            top_table = lapply(results_list, \(x) try(x$tt, silent = FALSE)),
+            label_outcomes = lapply(results_list, \(x) try(x$label_outcomes, silent = FALSE))
+        ) %>% select(-results_list)
     need_to_run <- sapply(sim_result_table$top_table, is, "try-error")
     assert_that(!any(need_to_run))
     qsave(sim_result_table, "sim_results.qs", nthreads = availableCores())
@@ -957,7 +960,7 @@ sim_result_label_outcomes_table <- sim_result_table %>%
     group_by(pick(all_of(sim_param_names)), Mislabeled_orig, Outcome) %>% 
     summarize( Num_Samples = n(), .groups = "drop" ) %>% 
     mutate(
-        Mislabeled_orig = ifelse( Mislabeled_orig, "mislabels", "correct labels" )
+        Mislabeled_orig = ifelse( Mislabeled_orig, "mislabels", "correct_labels" )
     ) %>% 
     pivot_wider(
         names_from = c("Mislabeled_orig", "Outcome"),
@@ -985,7 +988,6 @@ sim_result_perf_table <- sim_result_long_tt_table %>%
     full_join(sim_result_auc_table, by=sim_param_names, keep=FALSE) %>% 
     full_join(sim_result_label_outcomes_table, by=sim_param_names, keep=FALSE) %>% 
     mutate(
-      ## This is assuming you sample without replacement when simulating swaps
       Pct_Swapped = 100 * n_mislabels / (2 * n_samples_per_subject * n_subjects_per_group),
       Swap_Type = swap_model
     )
@@ -995,7 +997,9 @@ sim_result_perf_summary_table <- sim_result_perf_table %>%
     summarise(
         N_sims = n(),
         across(
-            c(FN, FP, TN, TP, Recall, Specificity, Precision, NPV, FDR, Accuracy, AUROC),
+            c(FN, FP, TN, TP, Recall, Specificity, Precision, NPV, FDR, Accuracy, AUROC, 
+              mislabels_correctly_relabeled, mislabels_removed, mislabels_incorrectly_relabeled, mislabels_ignored,
+              correct_labels_ignored, correct_labels_incorrectly_relabeled, correct_labels_removed),
             c(
                 mean = \(x) mean(x, na.rm = TRUE),
                 sd = \(x) sd(x, na.rm = TRUE),
@@ -1026,7 +1030,6 @@ sim_result_perf_summary_table <- sim_result_perf_table %>%
         .groups = "drop"
     ) %>%
     mutate(
-        ## This is assuming you sample without replacement when simulating swaps
         Pct_Swapped = 100 * n_mislabels / (2 * n_samples_per_subject * n_subjects_per_group),
         Swap_Type = swap_model
     )
@@ -1044,7 +1047,7 @@ make_y_aes <- \(measure) aes_string(
     ymax = glue("{measure}_mean + {measure}_se")
 )
 perf_names <- c("FN", "FP", "TN", "TP", "Recall", "Specificity", "Precision", "NPV", "FDR", "Accuracy", "AUROC")
-perf_ylim_max <- if_else(perf_names %in% c("FN", "FP", "TN", "TP"), 5000, 1) %>%
+perf_ylim_max <- if_else(perf_names %in% c("FN", "FP", "TN", "TP"), 300, 1) %>%
     set_names(perf_names)
 p1 <- ggplot(sim_result_perf_summary_table) +
     aes(
@@ -1129,6 +1132,51 @@ print(boxp)
 # dev.off()
 # qsave(boxp, path(getwd(), "sim_boxplot.qs"))
 ```
+## Label outcome plots
+```{r fig.height=28, fig.width=12}
+
+n_samples <- max(2*sim_result_perf_summary_table$n_samples_per_subject*sim_result_perf_summary_table$n_subjects_per_group, na.rm=TRUE)
+mislabel_handlers_to_plot <- c("majority_remove", "majority_cycles_correct", "majority_cycles_correct_and_remove")
+mislabels_perf_names <- c("mislabels_correctly_relabeled_mean", "mislabels_removed_mean", "mislabels_ignored_mean", "mislabels_incorrectly_relabeled_mean")
+perf_names <- c(mislabels_perf_names, "correct_labels_removed_mean", "correct_labels_ignored_mean", "correct_labels_incorrectly_relabeled_mean")
+perf_yx_slope <- if_else(perf_names %in% mislabels_perf_names, 1, -1) %>%
+    set_names(perf_names)
+perf_yx_intercept <- if_else(perf_names %in% mislabels_perf_names, 0, n_samples) %>%
+    set_names(perf_names)
+assert_that(
+    all(mislabel_handlers_to_plot %in% sim_result_perf_summary_table$handle_mislabels),
+    msg = "Specified mislabel handle methods that were not part of simulation grid")
+
+p1 <- ggplot(sim_result_perf_summary_table %>% filter(handle_mislabels %in% mislabel_handlers_to_plot)) +
+    aes(
+        x = n_mislabels,
+        y = mislabels_correctly_relabeled_mean,
+        color = handle_mislabels,
+        fill = handle_mislabels,
+        group = handle_mislabels
+    ) +
+    geom_line(
+        alpha = 0.5,
+        position = position_dodge(width = 3)
+    ) +
+    geom_point(position = position_dodge2(width = 3), shape = 23) +
+    facet_wrap("Swap_Type") + 
+    labs(
+        x = "Number of samples mislabeled", 
+        color = "How mislabels are handled",
+        fill = "How mislabels are handled"
+    ) + 
+    scale_color_brewer(palette = "Set1") + 
+    scale_fill_brewer(palette = "Set1")
+
+perf_plots <- lapply(perf_names, \(pn) p1 + aes_string(y=pn) + ylim(0, n_samples) + 
+                         geom_abline(intercept = perf_yx_intercept[[pn]], slope = perf_yx_slope[[pn]], linetype = "dashed", color = "black")) %>%
+    set_names(perf_names)
+
+p <- wrap_plots(perf_plots, ncol = 1, guides = "collect") & theme(legend.position = "top")
+print(p)
+
+```
 
 # Charles - playing around with code
 
@@ -1184,11 +1232,26 @@ test_auc_table <- sim_result_long_table %>%
 
 ```{r}
 
+
+
+
+
+
+
+
+
+
+
+## DO NOT TOUCH THESE BELOW ##
+
+## Case with 3C and 4C ambiguity that currently breaks the 
+## iterative_majority algorithm (the ambiguity is not filtered out
+## and you find 2 paths that return to the same head)
 elist_params <- list(
   n_subjects_per_group = 30,
   n_samples_per_subject = 5,
   n_features = 5,
-  n_mislabels = 60,
+  n_mislabels = 150,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -1202,16 +1265,6 @@ elist_params <- list(
 elist <- do.call(sim_mislabeled_data, elist_params)
 elist <- mislabel_handlers$majority_cycles_correct(elist)
 
-
-
-
-
-
-
-
-
-
-## DO NOT TOUCH THESE BELOW ##
 
 ## Case where no majority can be formed in a subject, so any cycle
 ## that passes through that subject cannot be resolved
@@ -1267,8 +1320,9 @@ elist_params <- list(
   sv_sd = 0.1,
   resid_sd = 0.1,
   swap_model = "random_with_replacement",
-  seed = 1989)
+  seed = 1990)
 elist <- do.call(sim_mislabeled_data, elist_params)
+elist <- mislabel_handlers$majority_cycles_correct(elist)
 
 ```
 
