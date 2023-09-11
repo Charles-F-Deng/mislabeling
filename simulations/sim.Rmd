@@ -284,8 +284,27 @@ mislabel_handlers <- list(
         ## This should just recover the original elist with no mislabeling
         return(reorder_elist_samples(elist, elist$targets$Sample_ID))
     },
-    greedy_search = function(elist) {
-        potential_relabels_list <- get_potential_relabels_list(elist)
+    majority_swap_correct = function(elist) {
+        ## Make unambiguous swaps (even ones where only one of the two mislabels in the swap get corrected)
+        while (TRUE) {
+            potential_relabels_list <- get_potential_relabels_list(elist)
+            ## Filter only samples with exactly one potential relabel
+            potential_relabels_list <- potential_relabels_list[lapply(potential_relabels_list, length) == 1]
+            if (length(potential_relabels_list) == 0) {
+                break
+            }
+            ## Create swap matrix
+            swaps <- data.frame(
+                swap_a = names(potential_relabels_list)
+            ) %>% mutate(
+                swap_b = sapply(swap_a, \(x) potential_relabels_list[[x]][[1]])   
+            ) %>% transmute(
+                swap_from = pmin(swap_a, swap_b),
+                swap_to = pmax(swap_a, swap_b)
+            ) %>% distinct()
+            elist <- swap_elist_samples(elist, swaps)
+        }
+        return(elist)
     },
     majority_remove = function(elist) {
         ## Remove all samples where the labeled Subject_ID doesn't match the 
@@ -341,7 +360,7 @@ mislabel_handlers <- list(
             }
             
             ## There should be no ambiguities as those are filtered out in get_potential_relabels_list
-            ## This fails sometimes refer to excel sheet - for testing purposes just detect it and break out
+            ## This fails sometimes: refer to excel sheet. To generate plots for Monday just detect it and break out right now
             if (nrow(
                     cycle_tree %>%
                         group_by(cycle_head) %>% 
@@ -1187,10 +1206,10 @@ my_params <- as.list(sim_table[need_to_run, sim_param_names][1, ])
 elist_params <- my_params[names(my_params) != "handle_mislabels"]
 
 elist_params <- list(
-  n_subjects_per_group = 3,
+  n_subjects_per_group = 30,
   n_samples_per_subject = 5,
   n_features = 10,
-  n_mislabels = 2,
+  n_mislabels = 15,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -1199,7 +1218,7 @@ elist_params <- list(
   age_sd = 0.1,
   sv_sd = 0.1,
   resid_sd = 0.1,
-  swap_model = "random",
+  swap_model = "random_with_replacement",
   seed = 1990)
 elist <- do.call(sim_mislabeled_data, elist_params)
 
