@@ -84,10 +84,10 @@ swap_elist_samples <- function(elist, swaps) {
     
     sample_ids <- elist$targets$E_Sample_ID
     for (row in 1:nrow(swaps)) {
-        sample1 <- swaps[row, 1]
-        sample2 <- swaps[row, 2]
-        index1 <- match(sample1, sample_ids)
-        index2 <- match(sample2, sample_ids)
+        index1 <- match(swaps[row, 1], elist$targets$Sample_ID)
+        index2 <- match(swaps[row, 2], elist$targets$Sample_ID)
+        sample1 <- sample_ids[[index1]]
+        sample2 <- sample_ids[[index2]]
         sample_ids[[index1]] = sample2
         sample_ids[[index2]] = sample1
     }
@@ -364,13 +364,13 @@ mislabel_handlers <- list(
                 left_join(connected_components, by="Sample_A") %>% 
                 filter(!(Cluster_ID %in% solved_components))
             if (nrow(neighbors) == 0) { break }
-            objectives <- objective_function(elist, neighbors)
-            swaps <- objectives %>% 
+            objectives <- objective_function(elist, neighbors) %>% 
                 group_by(Cluster_ID) %>% 
-                filter((delta_entropy < 0) & (delta_entropy == min(delta_entropy))) %>% 
+                filter((delta_entropy < 0) & (delta_entropy == min(delta_entropy))) 
+            if (nrow(objectives) == 0) { break }
+            swaps <- objectives %>%
                 sample_n(1) %>% 
                 as.data.frame()
-            if (nrow(swaps) == 0) { break }
             solved_components <- c(solved_components, setdiff(objectives$Cluster_ID, swaps$Cluster_ID))
             elist <- swap_elist_samples(elist, swaps[, c("Sample_A", "Sample_B")])
         }
@@ -605,7 +605,7 @@ generate_graph = function(elist, graph_type=names(graph_type_mapping)) {
     if (graph_type == "combined") {
         genotype_graph <- generate_graph(elist, "genotype")
         labels_graph <- generate_graph(elist, "label")
-        return(union(genotype_graph, labels_graph))
+        return(igraph::union(genotype_graph, labels_graph))
     }
     
     group_col <- graph_type_mapping[[graph_type]]
@@ -1061,7 +1061,7 @@ sim_table
 
 ## Comment this out later
 sim_table %<>% filter(handle_mislabels != "local_search_correct") %>% 
-    filter(!(handle_mislabels == "majority_cycles_swap_entropy_correct_and_remove" & n_mislabels > 90))
+    filter(!(handle_mislabels == "majority_cycles_swap_entropy_correct_and_remove" & n_mislabels > 150))
 ```
 
 # Run simulations
@@ -1385,14 +1385,24 @@ print(p)
 ## Debugging
 
 ```{r}
+
+for (row in 1:nrow(sim_table[need_to_run, ])) {
+    params <- as.list(sim_table[need_to_run, ][row, ])
+    print(params)
+    result <- do.call(run_sim, params) 
+}
+
+
+
+
 my_params <- as.list(sim_table[need_to_run, sim_param_names][1, ])
 elist_params <- my_params[names(my_params) != "handle_mislabels"]
 
 elist_params <- list(
   n_subjects_per_group = 30,
   n_samples_per_subject = 5,
-  n_features = 10,
-  n_mislabels = 150,
+  n_features = 1000,
+  n_mislabels = 110,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -1400,12 +1410,12 @@ elist_params <- list(
   sex_sd = 0.1,
   age_sd = 0.1,
   sv_sd = 0.1,
-  resid_sd = 0.1,
+  resid_sd = 0.05,
   swap_model = "random_with_replacement",
-  seed = 1990)
+  seed = 1986)
 elist <- do.call(sim_mislabeled_data, elist_params)
 elist1 <- mislabel_handlers$majority_cycles_swap_correct_and_remove(elist)
-elist2 <- mislabel_handlers$majority_cycles_swap_entropy_correct_and_remove(elist)
+elist <- mislabel_handlers$majority_cycles_swap_entropy_correct_and_remove(elist)
 
 sim_params <- elist_params
 sim_params$handle_mislabels <- "all_remove"
