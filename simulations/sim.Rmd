@@ -6,7 +6,18 @@ output: html_notebook
 
 # Load packages
 
+```{r}
+
+## Small TODOs:
+
+# 1. Run corrections with a seed
+# 2. Change relabel functions to swap labels and not whatever it is that I'm doing right now
+
+```
+
 ```{r message=FALSE, warning=FALSE}
+#source("sim_swap_handlers.R")
+
 library(rlang)
 is_named <- rlang::is_named
 library(withr)
@@ -19,7 +30,7 @@ rename <- dplyr::rename
 matches <- dplyr::matches
 mutate <- dplyr::mutate
 desc <- dplyr::desc
-library(tidyr)
+library(tidyr) 
 library(magrittr)
 subtract <- magrittr::subtract
 library(stringr)
@@ -52,7 +63,7 @@ plan(callr)
 try(source("prettylimma.R"), silent = TRUE)
 ```
 
-# Implement mislabel handlers
+# Helpers
 
 ```{r}
 
@@ -122,426 +133,10 @@ relabel_elist_samples <- function(elist, relabels) {
     return(reorder_elist_samples(elist, sample_ids))
 }
 
-get_mode <- function(x) {
-    return(names(which.max(table(x))))
-}
-
-## For each sample_ID, find all genotype matches and determine 
-## which subject_ID is most represented
-populate_majorities <- function(elist) {
-    elist$targets %<>% group_by( E_Subject_ID ) %>%
-        mutate(
-            Majority_Subject_ID = ifelse(
-                sum(get_mode(Subject_ID) == Subject_ID) / n() > 0.5,
-                get_mode(Subject_ID), NA_character_),
-            Non_Majority = Majority_Subject_ID != Subject_ID
-        ) %>%
-        ungroup() %>% as.data.frame()
-    ## Operation above drops row names...and get a warning if I try setting
-    ## row names without converting from tibble to dataframe
-    dimnames(elist) <- dimnames(elist)
-    return(elist)
-}
-
-detect_cycles <- function(elist) {
-    mislabeled_elist <- elist$targets %>% filter(Mislabeled)
-    cycle_list <- vector("list", nrow(mislabeled_elist))
-    i <- 1
-    while (nrow(mislabeled_elist) > 0) {
-        ## Start with first mislabeled Sample_ID
-        curr_sample_id <- mislabeled_elist[1, ]$Sample_ID
-        cycle <- c(curr_sample_id)
-        while (TRUE) {
-            next_sample_id <- mislabeled_elist[curr_sample_id, ]$E_Sample_ID
-            ## The stop condition is if we've returned to the head of the current cycle
-            if (next_sample_id == cycle[[1]]) {
-                break
-            } else {
-                cycle <- c(cycle, next_sample_id)
-                curr_sample_id <- next_sample_id
-            }
-        }
-        cycle_list[[i]] <- cycle
-        ## Filter out all the samples that were detected as part of this cycle
-        mislabeled_elist <- mislabeled_elist %>% filter(!(Sample_ID %in% cycle))
-        i <- i + 1
-    }
-    ## Filter out unused indices
-    cycle_list <- cycle_list[!sapply(cycle_list,is.null)]
-    return(cycle_list)
-}
-
-swap_handlers <- list(
-    random = function(elist, n_mislabels) {
-        correct_ctrl_samples <- elist$targets %>% filter(Status == "Control" & !Mislabeled) %>% pull(Sample_ID)
-        correct_case_samples <- elist$targets %>% filter(Status == "Case" & !Mislabeled) %>% pull(Sample_ID)
-        n_swaps <- floor(n_mislabels / 2)
-        swaps <- cbind(
-            sample(correct_ctrl_samples, n_swaps),
-            sample(correct_case_samples, n_swaps)
-        )
-        return(swap_elist_samples(elist, swaps))
-    },
-    random_with_replacement = function(elist, n_mislabels) {
-        n_correct_labels <- nrow(elist$targets %>% filter(!Mislabeled))
-        assert_that(n_mislabels <= n_correct_labels, 
-                    msg = glue("Can't generate {n_mislabels} new mislabels when there are only {n_correct_samples} correctly labeled samples"))
-        n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
-        n_goal_mislabels <- n_curr_mislabels + n_mislabels
-        n_rounds <- 0
-        while (n_curr_mislabels < n_goal_mislabels) {
-            n_new_mislabels <- n_goal_mislabels - n_curr_mislabels
-            mislabeled_samples <- elist$targets %>% filter(Mislabeled) %>% pull(Sample_ID)
-            correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
-            all_samples <- c(mislabeled_samples, correct_samples)
-            if (n_new_mislabels == 1) {
-                swaps <- cbind(
-                    sample(mislabeled_samples, 1),
-                    sample(correct_samples, 1)
-                )
-            } else if (n_new_mislabels == 2) {
-                swaps <- matrix(sample(correct_samples, 2), ncol = 2)
-            } else if (n_rounds > 5) {
-                swaps <- cbind(
-                    sample(mislabeled_samples, n_new_mislabels),
-                    sample(correct_samples, n_new_mislabels)
-                )
-            } else {
-                n_swaps <- floor(n_new_mislabels / 2)
-                swaps <- matrix(sample(all_samples, 2 * n_swaps, replace = TRUE), ncol = 2)
-            }
-            elist <- swap_elist_samples(elist, swaps)
-            n_rounds <- n_rounds + 1
-            n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
-        }
-        return(elist)
-    },
-    systematic = function(elist, n_mislabels) {
-        correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
-        n_swaps <- floor(n_mislabels / 2)
-        swaps <- cbind(
-            swaps <- matrix(sample(correct_samples, n_swaps * 2), ncol = 2)
-        )
-        return(swap_elist_samples(elist, swaps))
-    }
-)
-handle_swaps_options <- names(swap_handlers)
-
-## Helper function for the majority-based label correction algorithms
-## For each inferred mislabeled sample, find all potential relabels
-get_potential_relabels_list <- function(elist) {
-    elist <- populate_majorities(elist)
-    inferred_mislabel_univ <- elist$targets %>% 
-        filter(Non_Majority | is.na(Non_Majority)) %>% 
-        ## Ambiguous samples w/ same subject_id label in the same genotype_group
-        group_by(Subject_ID, E_Subject_ID) %>%
-        filter(n() == 1) %>% 
-        ungroup() %>% 
-        pull(Sample_ID)
-    
-    potential_relabels_list <- list()
-    for (sample_id in inferred_mislabel_univ) {
-        majority_subject_id <- elist$targets[sample_id, ]$Majority_Subject_ID
-        ## If sample_id A's genotype group has a consensus majority_subject_id
-        ## The potential_relabels are sample_ids B that satisfy
-        ##      1) their subject_id matches the majority_subject_id for sample A 
-        ##      2) their subject_id doesn't match the majority_subject_id in its own genotype group
-        if (!is.na(majority_subject_id)) {
-            potential_relabels <- elist$targets %>% 
-                filter(Subject_ID == majority_subject_id & (Non_Majority | is.na(Non_Majority))) %>% 
-                pull(Sample_ID)
-        ## If sample_id A's genotype group doesn't have a consensus majority_subject_id
-        ## The potential_relabels are sample_ids B that satisfy
-        ##      1) their subject_id would cast the deciding vote for a majority_subject_id in the genotype group for sample A
-        ##      2) they are in a different genotype group than sample_id A
-        } else {
-            e_subject_id <- elist$targets[sample_id, ]$E_Subject_ID
-            subject_id <- elist$targets[sample_id, ]$Subject_ID
-            potential_relabels <- c()
-            genotype_group <- elist$targets %>% 
-                filter(E_Subject_ID == e_subject_id)
-            n <- nrow(genotype_group)
-            for (curr_subject_id in unique(genotype_group$Subject_ID)) {
-                if (curr_subject_id == subject_id) { next }
-                n_votes <- nrow(genotype_group %>% filter(Subject_ID == curr_subject_id))
-                if ((n_votes + 1) / n > 0.5) {
-                    curr_potential_relabels <- elist$targets %>% 
-                        filter(Subject_ID == curr_subject_id & !(Sample_ID %in% genotype_group$Sample_ID)) %>% 
-                        pull(Sample_ID)
-                    potential_relabels <- c(potential_relabels, curr_potential_relabels)
-                }
-            }
-        }
-        potential_relabels_list[[sample_id]] <- potential_relabels
-    }
-    return(potential_relabels_list)
-}
-
-local_search_objectives <- list(
-    genotype_entropy = function(elist, neighbors) {
-        calc_entropy = function(labels) {
-            labels %>% group_by(E_Subject_ID) %>%
-                summarize(scaled_entropy = entropy(table(Subject_ID))/entropy(rep(1, n()))) %>%
-                select(scaled_entropy) %>%
-                sum()
-        }
-        
-        elist_labels <- elist$targets[, c("Sample_ID", "Subject_ID", "E_Subject_ID")]
-        elist_entropy <- calc_entropy(elist_labels)
-        
-        calc_delta_entropy = function(swap_from, swap_to) {
-            filtered_genotypes <- elist_labels %>%
-                filter(Sample_ID %in% c(swap_from, swap_to)) %>%
-                pull(E_Subject_ID)
-            filtered_labels <- elist_labels %>% filter(E_Subject_ID %in% filtered_genotypes)
-            swap_from_genotype <- filtered_labels[[swap_from, "E_Subject_ID"]]
-            swap_to_genotype <- filtered_labels[[swap_to, "E_Subject_ID"]]
-            swapped_labels <- filtered_labels
-            swapped_labels[swap_from, "E_Subject_ID"] <- swap_to_genotype
-            swapped_labels[swap_to, "E_Subject_ID"] <- swap_from_genotype
-            return(calc_entropy(swapped_labels) - calc_entropy(filtered_labels))
-        }
-        
-        neighbors %<>% mutate(
-            base_entropy = elist_entropy,
-            delta_entropy = mapply(calc_delta_entropy, swap_from=Sample_A, swap_to=Sample_B),
-            objective = base_entropy + delta_entropy
-        )
-        return(neighbors)
-    }
-)
-objective_function_options <- names(local_search_objectives)
-
-mislabel_handlers <- list(
-    all_ignore = identity,
-    all_remove = function(elist) {
-        return(elist[, !elist$targets$Mislabeled])
-    },
-    all_correct = function(elist) {
-        ## This should just recover the original elist with no mislabeling
-        return(reorder_elist_samples(elist, elist$targets$Sample_ID))
-    },
-    local_search_correct = function(elist, objective=objective_function_options) {
-        
-        objective <- as.character(objective)
-        objective <- match.arg(objective)
-        if (objective %in% objective_function_options) {
-            objective_function <- local_search_objectives[[objective]]
-        } else {
-            stop(glue("Unrecognized value for objective_function: {objective_function}"))
-        }
-        
-        ## For any objective, the only improving swaps involve 2 samples connected 
-        ## to a common sample but not each other. One has a genotype edge and one a label edge
-        find_neighbors = function(graph) {
-            graph_distances <- distances(graph)
-            dist_equals_2 <- graph_distances == 2 
-            row_indices <- row(dist_equals_2)[dist_equals_2]
-            col_indices <- col(dist_equals_2)[dist_equals_2]
-            unique_pairs <- data.frame(
-                Row = rownames(graph_distances)[row_indices], 
-                Col = colnames(graph_distances)[col_indices]) %>% 
-                transmute(
-                    Sample_A = pmin(Row, Col),
-                    Sample_B = pmax(Row, Col)
-                ) %>% unique()
-            return(unique_pairs)
-        }
-        
-        ## Generate ID for each connected component - very fast so this won't change with each iteration
-        ## Even when a connected component splits into 2
-        combined_graph <- generate_graph(elist, "combined")
-        connected_components <- clusters(combined_graph)$membership
-        connected_components <- data.frame(
-            Sample_A = names(connected_components),
-            Cluster_ID = connected_components
-        )
-        solved_components <- c()
-        
-        while (TRUE) {
-            combined_graph <- generate_graph(elist, "combined")
-            neighbors <- find_neighbors(combined_graph) %>% 
-                left_join(connected_components, by="Sample_A") %>% 
-                filter(!(Cluster_ID %in% solved_components))
-            if (nrow(neighbors) == 0) { break }
-            objectives <- objective_function(elist, neighbors) %>% 
-                group_by(Cluster_ID) %>% 
-                filter((delta_entropy < 0) & (delta_entropy == min(delta_entropy))) 
-            if (nrow(objectives) == 0) { break }
-            swaps <- objectives %>%
-                sample_n(1) %>% 
-                as.data.frame()
-            solved_components <- c(solved_components, setdiff(objectives$Cluster_ID, swaps$Cluster_ID))
-            elist <- swap_elist_samples(elist, swaps[, c("Sample_A", "Sample_B")])
-        }
-        return(elist)
-    },
-    majority_swap_correct = function(elist) {
-        iterations <- 1
-        ## Make unambiguous swaps (even ones where only one of the two mislabels in the swap get corrected)
-        while (iterations < 8) {
-            potential_relabels_list <- get_potential_relabels_list(elist)
-            ## Filter only samples with exactly one potential relabel
-            potential_relabels_list <- potential_relabels_list[lapply(potential_relabels_list, length) == 1]
-            if (length(potential_relabels_list) == 0) {
-                break
-            }
-            ## Create relabels matrix
-            incomplete_relabels <- data.frame(
-                relabel_from = names(potential_relabels_list)
-            ) %>% mutate(
-                relabel_to = sapply(relabel_from, \(x) potential_relabels_list[[x]][[1]])
-            )
-            
-            ## First determine relabels when you know there are no cycles 
-            ## (linear sequence of relabels where we can't close the cycle)
-            linear_relabels <- data.frame(matrix(ncol = 2, nrow = 0))
-            colnames(linear_relabels) <- colnames(incomplete_relabels)
-            # Convert all columns to character type
-            linear_relabels <- as.data.frame(sapply(linear_relabels, as.character))
-            starts <- setdiff(incomplete_relabels$relabel_from, incomplete_relabels$relabel_to)
-            for (start in starts) {
-                curr_sample <- start
-                while (TRUE) {
-                    extend_index <- which(incomplete_relabels$relabel_from == curr_sample)
-                    assert_that(length(extend_index) %in% c(0, 1), msg="Something is wrong in majority_swap_correct")
-                    ## Once you reach the end, forcefully close the cycle
-                    ## TODO: just remove start sample instead
-                    if (length(extend_index) == 0) {
-                        linear_relabels <- rbind(linear_relabels, data.frame(
-                            relabel_from = curr_sample,
-                            relabel_to = start
-                        ))
-                        break
-                    }
-                    next_sample <- incomplete_relabels[[extend_index, "relabel_to"]]
-                    linear_relabels <- rbind(linear_relabels, data.frame(
-                        relabel_from = curr_sample,
-                        relabel_to = next_sample
-                    ))
-                    curr_sample <- next_sample
-                }
-            }
-            cycle_relabels <- anti_join(incomplete_relabels, linear_relabels, by=names(incomplete_relabels))
-            relabels <- rbind(cycle_relabels, linear_relabels)
-            elist <- relabel_elist_samples(elist, relabels)
-            iterations <- iterations + 1
-        }
-        return(elist)
-    },
-    majority_remove = function(elist) {
-        ## Remove all samples where the labeled Subject_ID doesn't match the 
-        ## majority Subject_ID in its genotype set
-        elist <- populate_majorities(elist)
-        elist <- elist[, !(elist$targets$Non_Majority | is.na(elist$targets$Non_Majority))]
-        elist$targets %<>% select(-c(Majority_Subject_ID, Non_Majority))
-        return(elist)
-    },
-    majority_cycles_correct = function(elist, max_cycle_size = 8) {
-        while (TRUE) {
-            assert_that(max_cycle_size > 1, msg=glue("max_cycle_size must be greater than 1, currently {max_cycle_size}"))
-            potential_relabels_list <- get_potential_relabels_list(elist)
-            
-            ## Stopping condition if there are no inferred mislabels
-            if (length(potential_relabels_list) == 0) {
-                break
-            }
-            
-            ## Initialize the cycle tree
-            cycle_tree <- data.frame(cycle_head = names(potential_relabels_list)) %>% 
-                mutate(
-                    cycle_path = as.list(cycle_head),
-                    cycle_tail = cycle_head,
-                    cycle_size = 0
-                )
-            
-            ## Extend the cycle tree until a cycle has been detected
-            for (curr_cycle_size in seq_len(max_cycle_size)) {
-                ## Collect all leaf nodes and extend by potential_relabels
-                cycle_leaf_nodes <- cycle_tree %>% filter(cycle_size == curr_cycle_size - 1) 
-                cycle_leaf_nodes %<>% mutate(
-                    cycle_tail = lapply(cycle_tail, function(x) potential_relabels_list[[x]])
-                ) %>% 
-                    unnest(cycle_tail) %>% 
-                    mutate(
-                        cycle_size = curr_cycle_size,
-                        cycle_path = Map(c, cycle_path, cycle_tail)
-                    )
-                
-                cycle_tree <- cycle_leaf_nodes
-                
-                ## Break if we've detected a cycle, or if we've reached a dead-end at each path
-                if (nrow(cycle_tree) == 0 || any(cycle_tree$cycle_head == cycle_tree$cycle_tail)) { break }
-            }
-            
-            ## Filter in complete cycles only
-            cycle_tree %<>% filter(cycle_head == cycle_tail)
-            
-            ## Stopping condition if we've looped to max_cycle_size and haven't detected any cycles
-            if (nrow(cycle_tree) == 0) {
-                break
-            }
-            
-            ## There should be no ambiguities as those are filtered out in get_potential_relabels_list
-            ## This fails sometimes: refer to excel sheet. To generate plots for Monday just detect it and break out right now
-            if (nrow(
-                    cycle_tree %>%
-                        group_by(cycle_head) %>% 
-                        filter(n() > 1)
-                ) > 0) {break}
-            assert_that(
-                nrow(
-                    cycle_tree %>%
-                        group_by(cycle_head) %>% 
-                        filter(n() > 1)
-                ) == 0,
-                msg = "Detected distinct cycles that return to the same head sample"
-            )
-            assert_that(all(cycle_tree$cycle_size > 1), msg = "Detected cycles of size < 2")
-            
-            relabels <- cycle_tree %>% 
-                transmute(
-                    curr_label = cycle_path,
-                    new_label = lapply(cycle_path, lead)
-                ) %>% 
-                unnest(everything()) %>% 
-                filter(complete.cases(.)) %>% 
-                distinct() %>% 
-                as.data.frame()
-            
-            ## Call relabeling
-            elist <- relabel_elist_samples(elist, relabels)
-        }
-        return(elist)
-    },
-    majority_cycles_correct_and_remove = function(elist, max_cycle_size = 8) {
-        elist <- mislabel_handlers$majority_cycles_correct(elist, max_cycle_size)
-        elist <- mislabel_handlers$majority_remove(elist)
-        return(elist)
-    },
-    majority_cycles_swap_correct_and_remove = function(elist, max_cycle_size = 8) {
-        elist <- mislabel_handlers$majority_cycles_correct(elist, max_cycle_size)
-        elist <- mislabel_handlers$majority_swap_correct(elist)
-        elist <- mislabel_handlers$majority_remove(elist)
-        return(elist)
-    },
-    majority_cycles_swap_entropy_correct_and_remove = function(elist, max_cycle_size = 8) {
-        elist <- mislabel_handlers$majority_cycles_correct(elist, max_cycle_size)
-        elist <- mislabel_handlers$majority_swap_correct(elist)
-        elist <- mislabel_handlers$local_search_correct(elist, "genotype_entropy")
-        elist <- mislabel_handlers$majority_remove(elist)
-        return(elist)
-    }
-)
-handle_mislabels_options <- names(mislabel_handlers)
-```
-
-# Define simulation code
-
-```{r}
 digits <- function(x, base = 10) {
     1 + floor(log(x, base = base))
 }
+
 generate_ids <- function(prefix, n) {
     if (length(n) == 1) {
         n <- seq_len(n)
@@ -550,6 +145,7 @@ generate_ids <- function(prefix, n) {
     digit_format <- str_c("%0", num_digits, "i")
     str_c(prefix, sprintf(digit_format, n))
 }
+
 ## The SVD-based check crashes with Lapack errors sometimes
 ## design_is_identifiable <- function(dmat, eps = 2e-16) {
 ##     min(svd(dmat)$d) > eps
@@ -630,13 +226,477 @@ generate_graph = function(elist, graph_type=names(graph_type_mapping)) {
     return(graph)
 }
 
+detect_cycles <- function(elist) {
+    mislabeled_elist <- elist$targets %>% filter(Mislabeled)
+    cycle_list <- vector("list", nrow(mislabeled_elist))
+    i <- 1
+    while (nrow(mislabeled_elist) > 0) {
+        ## Start with first mislabeled Sample_ID
+        curr_sample_id <- mislabeled_elist[1, ]$Sample_ID
+        cycle <- c(curr_sample_id)
+        while (TRUE) {
+            next_sample_id <- mislabeled_elist[curr_sample_id, ]$E_Sample_ID
+            ## The stop condition is if we've returned to the head of the current cycle
+            if (next_sample_id == cycle[[1]]) {
+                break
+            } else {
+                cycle <- c(cycle, next_sample_id)
+                curr_sample_id <- next_sample_id
+            }
+        }
+        cycle_list[[i]] <- cycle
+        ## Filter out all the samples that were detected as part of this cycle
+        mislabeled_elist <- mislabeled_elist %>% filter(!(Sample_ID %in% cycle))
+        i <- i + 1
+    }
+    ## Filter out unused indices
+    cycle_list <- cycle_list[!sapply(cycle_list,is.null)]
+    return(cycle_list)
+}
+
+```
+
+# Define swap handlers
+
+```{r}
+
+genswaps_random = function(elist, n_mislabels) {
+    correct_ctrl_samples <- elist$targets %>% filter(Status == "Control" & !Mislabeled) %>% pull(Sample_ID)
+    correct_case_samples <- elist$targets %>% filter(Status == "Case" & !Mislabeled) %>% pull(Sample_ID)
+    n_swaps <- floor(n_mislabels / 2)
+    swaps <- cbind(
+        sample(correct_ctrl_samples, n_swaps),
+        sample(correct_case_samples, n_swaps)
+    )
+    return(swap_elist_samples(elist, swaps))
+}
+
+genswaps_random_with_replacement = function(elist, n_mislabels) {
+    n_correct_labels <- nrow(elist$targets %>% filter(!Mislabeled))
+    assert_that(n_mislabels <= n_correct_labels, 
+                msg = glue("Can't generate {n_mislabels} new mislabels when there are only {n_correct_samples} correctly labeled samples"))
+    n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
+    n_goal_mislabels <- n_curr_mislabels + n_mislabels
+    n_rounds <- 0
+    while (n_curr_mislabels < n_goal_mislabels) {
+        n_new_mislabels <- n_goal_mislabels - n_curr_mislabels
+        mislabeled_samples <- elist$targets %>% filter(Mislabeled) %>% pull(Sample_ID)
+        correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
+        all_samples <- c(mislabeled_samples, correct_samples)
+        if (n_new_mislabels == 1) {
+            swaps <- cbind(
+                sample(mislabeled_samples, 1),
+                sample(correct_samples, 1)
+            )
+        } else if (n_new_mislabels == 2) {
+            swaps <- matrix(sample(correct_samples, 2), ncol = 2)
+        } else if (n_rounds > 5) {
+            swaps <- cbind(
+                sample(mislabeled_samples, n_new_mislabels),
+                sample(correct_samples, n_new_mislabels)
+            )
+        } else {
+            n_swaps <- floor(n_new_mislabels / 2)
+            swaps <- matrix(sample(all_samples, 2 * n_swaps, replace = TRUE), ncol = 2)
+        }
+        elist <- swap_elist_samples(elist, swaps)
+        n_rounds <- n_rounds + 1
+        n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
+    }
+    return(elist)
+}
+
+genswaps_systematic = function(elist, n_mislabels) {
+    correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
+    n_swaps <- floor(n_mislabels / 2)
+    swaps <- cbind(
+        swaps <- matrix(sample(correct_samples, n_swaps * 2), ncol = 2)
+    )
+    return(swap_elist_samples(elist, swaps))
+}
+
+swap_handlers <- list(
+    random = genswaps_random,
+    random_with_replacement = genswaps_random_with_replacement,
+    systematic = genswaps_systematic
+)
+handle_swaps_options <- names(swap_handlers)
+
+```
+
+# Define mislabel handlers
+
+```{r}
+
+get_mode <- function(x) {
+    return(names(which.max(table(x))))
+}
+
+## For each sample_ID, find all genotype matches and determine 
+## which subject_ID is most represented
+populate_majorities <- function(elist) {
+    elist$targets %<>% group_by( E_Subject_ID ) %>%
+        mutate(
+            Majority_Subject_ID = ifelse(
+                sum(get_mode(Subject_ID) == Subject_ID) / n() > 0.5,
+                get_mode(Subject_ID), NA_character_),
+            Non_Majority = Majority_Subject_ID != Subject_ID
+        ) %>%
+        ungroup() %>% as.data.frame()
+    ## Operation above drops row names...and get a warning if I try setting
+    ## row names without converting from tibble to dataframe
+    dimnames(elist) <- dimnames(elist)
+    return(elist)
+}
+
+## Helper function for the majority-based label correction algorithms
+## For each inferred mislabeled sample, find all potential relabels
+get_potential_relabels_list <- function(elist) {
+    elist <- populate_majorities(elist)
+    inferred_mislabel_univ <- elist$targets %>% 
+        filter(Non_Majority | is.na(Non_Majority)) %>% 
+        ## Ambiguous samples w/ same subject_id label in the same genotype_group
+        group_by(Subject_ID, E_Subject_ID) %>%
+        filter(n() == 1) %>% 
+        ungroup() %>% 
+        pull(Sample_ID)
+    
+    potential_relabels_list <- list()
+    for (sample_id in inferred_mislabel_univ) {
+        majority_subject_id <- elist$targets[sample_id, ]$Majority_Subject_ID
+        ## If sample_id A's genotype group has a consensus majority_subject_id
+        ## The potential_relabels are sample_ids B that satisfy
+        ##      1) their subject_id matches the majority_subject_id for sample A 
+        ##      2) their subject_id doesn't match the majority_subject_id in its own genotype group
+        if (!is.na(majority_subject_id)) {
+            potential_relabels <- elist$targets %>% 
+                filter(Subject_ID == majority_subject_id & (Non_Majority | is.na(Non_Majority))) %>% 
+                pull(Sample_ID)
+        ## If sample_id A's genotype group doesn't have a consensus majority_subject_id
+        ## The potential_relabels are sample_ids B that satisfy
+        ##      1) their subject_id would cast the deciding vote for a majority_subject_id in the genotype group for sample A
+        ##      2) they are in a different genotype group than sample_id A
+        } else {
+            e_subject_id <- elist$targets[sample_id, ]$E_Subject_ID
+            subject_id <- elist$targets[sample_id, ]$Subject_ID
+            potential_relabels <- c()
+            genotype_group <- elist$targets %>% 
+                filter(E_Subject_ID == e_subject_id)
+            n <- nrow(genotype_group)
+            for (curr_subject_id in unique(genotype_group$Subject_ID)) {
+                if (curr_subject_id == subject_id) { next }
+                n_votes <- nrow(genotype_group %>% filter(Subject_ID == curr_subject_id))
+                if ((n_votes + 1) / n > 0.5) {
+                    curr_potential_relabels <- elist$targets %>% 
+                        filter(Subject_ID == curr_subject_id & !(Sample_ID %in% genotype_group$Sample_ID)) %>% 
+                        pull(Sample_ID)
+                    potential_relabels <- c(potential_relabels, curr_potential_relabels)
+                }
+            }
+        }
+        potential_relabels_list[[sample_id]] <- potential_relabels
+    }
+    return(potential_relabels_list)
+}
+
+calc_entropy = function(labels) {
+    labels %>% group_by(E_Subject_ID) %>%
+        summarize(scaled_entropy = entropy(table(Subject_ID))/entropy(rep(1, n()))) %>%
+        select(scaled_entropy) %>%
+        sum()
+}
+
+calc_delta_entropy = function(swap_from, swap_to) {
+    filtered_genotypes <- elist_labels %>%
+        filter(Sample_ID %in% c(swap_from, swap_to)) %>%
+        pull(E_Subject_ID)
+    filtered_labels <- elist_labels %>% filter(E_Subject_ID %in% filtered_genotypes)
+    swap_from_genotype <- filtered_labels[[swap_from, "E_Subject_ID"]]
+    swap_to_genotype <- filtered_labels[[swap_to, "E_Subject_ID"]]
+    swapped_labels <- filtered_labels
+    swapped_labels[swap_from, "E_Subject_ID"] <- swap_to_genotype
+    swapped_labels[swap_to, "E_Subject_ID"] <- swap_from_genotype
+    return(calc_entropy(swapped_labels) - calc_entropy(filtered_labels))
+}
+
+objective_genotype_entropy <- function(elist, neighbors) {
+    elist_labels <- elist$targets[, c("Sample_ID", "Subject_ID", "E_Subject_ID")]
+    elist_entropy <- calc_entropy(elist_labels)
+    
+    neighbors %<>% mutate(
+        base_entropy = elist_entropy,
+        delta_entropy = mapply(calc_delta_entropy, swap_from=Sample_A, swap_to=Sample_B),
+        objective = base_entropy + delta_entropy
+    )
+    return(neighbors)
+}
+
+search_objectives <- list(
+    genotype_entropy = objective_genotype_entropy
+)
+objective_options <- names(search_objectives)
+
+local_search_correct <- function(elist, objective=objective_options) {
+    objective <- as.character(objective)
+    objective <- match.arg(objective)
+    if (objective %in% objective_options) {
+        objective_function <- search_objectives[[objective]]
+    } else {
+        stop(glue("Unrecognized value for objective_function: {objective_function}"))
+    }
+
+    ## For any objective, the only improving swaps involve 2 samples connected
+    ## to a common sample but not each other. One has a genotype edge and one a label edge
+    find_neighbors = function(graph) {
+        graph_distances <- distances(graph)
+        dist_equals_2 <- graph_distances == 2
+        row_indices <- row(dist_equals_2)[dist_equals_2]
+        col_indices <- col(dist_equals_2)[dist_equals_2]
+        unique_pairs <- data.frame(
+            Row = rownames(graph_distances)[row_indices],
+            Col = colnames(graph_distances)[col_indices]) %>%
+            transmute(
+                Sample_A = pmin(Row, Col),
+                Sample_B = pmax(Row, Col)
+            ) %>% unique()
+        return(unique_pairs)
+    }
+
+    ## Generate ID for each connected component - very fast so this won't change with each iteration
+    ## Even when a connected component splits into 2
+    combined_graph <- generate_graph(elist, "combined")
+    connected_components <- clusters(combined_graph)$membership
+    connected_components <- data.frame(
+        Sample_A = names(connected_components),
+        Cluster_ID = connected_components
+    )
+    solved_components <- c()
+
+    while (TRUE) {
+        combined_graph <- generate_graph(elist, "combined")
+        neighbors <- find_neighbors(combined_graph) %>%
+            left_join(connected_components, by="Sample_A") %>%
+            filter(!(Cluster_ID %in% solved_components))
+        if (nrow(neighbors) == 0) { break }
+        objectives <- objective_function(elist, neighbors) %>%
+            group_by(Cluster_ID) %>%
+            filter((delta_entropy < 0) & (delta_entropy == min(delta_entropy)))
+        if (nrow(objectives) == 0) { break }
+        swaps <- objectives %>%
+            sample_n(1) %>%
+            as.data.frame()
+        solved_components <- c(solved_components, setdiff(objectives$Cluster_ID, swaps$Cluster_ID))
+        elist <- swap_elist_samples(elist, swaps[, c("Sample_A", "Sample_B")])
+    }
+    return(elist)
+}
+
+##################################################
+### Start defining the mislabel handlers below ###
+##################################################
+
+handle_mislabels_ignore <- identity
+
+handle_mislabels_remove_oracle <- function(elist) {
+    return(elist[, !elist$targets$Mislabeled])
+}
+
+handle_mislabels_correct_oracle <- function(elist) {
+    ## This should just recover the original elist with no mislabeling
+    return(reorder_elist_samples(elist, elist$targets$Sample_ID))
+}
+
+handle_mislabels_correct_majority_cycles <- function(elist, max_cycle_size = 8) {
+    while (TRUE) {
+        assert_that(max_cycle_size > 1, msg=glue("max_cycle_size must be greater than 1, currently {max_cycle_size}"))
+        potential_relabels_list <- get_potential_relabels_list(elist)
+        
+        ## Stopping condition if there are no inferred mislabels
+        if (length(potential_relabels_list) == 0) {
+            break
+        }
+        
+        ## Initialize the cycle tree
+        cycle_tree <- data.frame(cycle_head = names(potential_relabels_list)) %>% 
+            mutate(
+                cycle_path = as.list(cycle_head),
+                cycle_tail = cycle_head,
+                cycle_size = 0
+            )
+        
+        ## Extend the cycle tree until a cycle has been detected
+        for (curr_cycle_size in seq_len(max_cycle_size)) {
+            ## Collect all leaf nodes and extend by potential_relabels
+            cycle_leaf_nodes <- cycle_tree %>% filter(cycle_size == curr_cycle_size - 1) 
+            cycle_leaf_nodes %<>% mutate(
+                cycle_tail = lapply(cycle_tail, function(x) potential_relabels_list[[x]])
+            ) %>% 
+                unnest(cycle_tail) %>% 
+                mutate(
+                    cycle_size = curr_cycle_size,
+                    cycle_path = Map(c, cycle_path, cycle_tail)
+                )
+            
+            cycle_tree <- cycle_leaf_nodes
+            
+            ## Break if we've detected a cycle, or if we've reached a dead-end at each path
+            if (nrow(cycle_tree) == 0 || any(cycle_tree$cycle_head == cycle_tree$cycle_tail)) { break }
+        }
+        
+        ## Filter in complete cycles only
+        cycle_tree %<>% filter(cycle_head == cycle_tail)
+        
+        ## Stopping condition if we've looped to max_cycle_size and haven't detected any cycles
+        if (nrow(cycle_tree) == 0) {
+            break
+        }
+        
+        ## There should be no ambiguities as those are filtered out in get_potential_relabels_list
+        ## This fails sometimes: refer to excel sheet. To generate plots for Monday just detect it and break out right now
+        if (nrow(
+            cycle_tree %>%
+            group_by(cycle_head) %>% 
+            filter(n() > 1)
+        ) > 0) {break}
+        assert_that(
+            nrow(
+                cycle_tree %>%
+                    group_by(cycle_head) %>% 
+                    filter(n() > 1)
+            ) == 0,
+            msg = "Detected distinct cycles that return to the same head sample"
+        )
+        assert_that(all(cycle_tree$cycle_size > 1), msg = "Detected cycles of size < 2")
+        
+        relabels <- cycle_tree %>% 
+            transmute(
+                curr_label = cycle_path,
+                new_label = lapply(cycle_path, lead)
+            ) %>% 
+            unnest(everything()) %>% 
+            filter(complete.cases(.)) %>% 
+            distinct() %>% 
+            as.data.frame()
+        
+        ## Call relabeling
+        elist <- relabel_elist_samples(elist, relabels)
+    }
+    return(elist)
+}
+
+handle_mislabels_correct_majority_swaps <- function(elist) {
+    iterations <- 1
+    ## Make unambiguous swaps (even ones where only one of the two mislabels in the swap get corrected)
+    while (iterations < 8) {
+        potential_relabels_list <- get_potential_relabels_list(elist)
+        ## Filter only samples with exactly one potential relabel
+        potential_relabels_list <- potential_relabels_list[lapply(potential_relabels_list, length) == 1]
+        if (length(potential_relabels_list) == 0) {
+            break
+        }
+        ## Create relabels matrix
+        incomplete_relabels <- data.frame(
+            relabel_from = names(potential_relabels_list)
+        ) %>% mutate(
+            relabel_to = sapply(relabel_from, \(x) potential_relabels_list[[x]][[1]])
+        )
+        
+        ## First determine relabels when you know there are no cycles 
+        ## (linear sequence of relabels where we can't close the cycle)
+        linear_relabels <- data.frame(matrix(ncol = 2, nrow = 0))
+        colnames(linear_relabels) <- colnames(incomplete_relabels)
+        # Convert all columns to character type
+        linear_relabels <- as.data.frame(sapply(linear_relabels, as.character))
+        starts <- setdiff(incomplete_relabels$relabel_from, incomplete_relabels$relabel_to)
+        for (start in starts) {
+            curr_sample <- start
+            while (TRUE) {
+                extend_index <- which(incomplete_relabels$relabel_from == curr_sample)
+                assert_that(length(extend_index) %in% c(0, 1), msg="Something is wrong in majority_swap_correct")
+                ## Once you reach the end, forcefully close the cycle
+                ## TODO: just remove start sample instead
+                if (length(extend_index) == 0) {
+                    linear_relabels <- rbind(linear_relabels, data.frame(
+                        relabel_from = curr_sample,
+                        relabel_to = start
+                    ))
+                    break
+                }
+                next_sample <- incomplete_relabels[[extend_index, "relabel_to"]]
+                linear_relabels <- rbind(linear_relabels, data.frame(
+                    relabel_from = curr_sample,
+                    relabel_to = next_sample
+                ))
+                curr_sample <- next_sample
+            }
+        }
+        cycle_relabels <- anti_join(incomplete_relabels, linear_relabels, by=names(incomplete_relabels))
+        relabels <- rbind(cycle_relabels, linear_relabels)
+        elist <- relabel_elist_samples(elist, relabels)
+        iterations <- iterations + 1
+    }
+    return(elist)
+}
+
+handle_mislabels_remove_majority <- function(elist) {
+    ## Remove all samples where the labeled Subject_ID doesn't match the 
+    ## majority Subject_ID in its genotype set
+    elist <- populate_majorities(elist)
+    elist <- elist[, !(elist$targets$Non_Majority | is.na(elist$targets$Non_Majority))]
+    elist$targets %<>% select(-c(Majority_Subject_ID, Non_Majority))
+    return(elist)
+}
+
+handle_mislabels_correct_local_search_entropy <- function(elist) {
+    return(local_search_correct(elist, objective="genotype_entropy"))
+}
+
+handle_mislabels_correct_majority_cycles_with_remove_majority <- function(elist, max_cycle_size = 8) {
+    elist <- handle_mislabels_correct_majority_cycles(elist, max_cycle_size)
+    elist <- handle_mislabels_remove_majority(elist)
+    return(elist)
+}
+
+handle_mislabels_correct_majority_cycles_swaps_with_remove_majority <- function(elist, max_cycle_size = 8) {
+    elist <- handle_mislabels_correct_majority_cycles(elist, max_cycle_size)
+    elist <- handle_mislabels_correct_majority_swaps(elist)
+    elist <- handle_mislabels_remove_majority(elist)
+    return(elist)
+}
+
+handle_mislabels_correct_majority_cycles_swaps_entropy_with_remove_majority <- function(elist, max_cycle_size = 8) {
+    elist <- handle_mislabels_correct_majority_cycles(elist, max_cycle_size)
+    elist <- handle_mislabels_correct_majority_swaps(elist)
+    elist <- handle_mislabels_correct_local_search_entropy(elist)
+    elist <- handle_mislabels_remove_majority(elist)
+    return(elist)
+}
+
+mislabel_handlers <- list(
+    ignore = handle_mislabels_ignore,
+    remove_oracle = handle_mislabels_remove_oracle,
+    correct_oracle = handle_mislabels_correct_oracle,
+    correct_majority_cycles = handle_mislabels_correct_majority_cycles,
+    correct_majority_swaps = handle_mislabels_correct_majority_swaps,
+    remove_majority = handle_mislabels_remove_majority,
+    correct_local_search_entropy = handle_mislabels_correct_local_search_entropy,
+    correct_majority_cycles_with_remove_majority = handle_mislabels_correct_majority_cycles_with_remove_majority,
+    correct_majority_cycles_swaps_with_remove_majority = handle_mislabels_correct_majority_cycles_swaps_with_remove_majority,
+    correct_majority_cycles_swaps_entropy_with_remove_majority = handle_mislabels_correct_majority_cycles_swaps_entropy_with_remove_majority
+)
+handle_mislabels_options <- names(mislabel_handlers)
+```
+
+# Define simulation code
+
+```{r}
+
 ## Example values for testing
 local({
     n_subjects_per_group = 10
     n_samples_per_subject = 3
     n_features = 2
     n_mislabels = 10
-    swap_systematic = FALSE
     n_sv = 2
     fraction_de_case = 0.5
     case_sd = 0.1
@@ -645,6 +705,7 @@ local({
     resid_sd = 0.1
     sex_sd = 0.1
     age_sd = 0.1
+    swap_model = "random"
     seed = 1986
 })
 
@@ -688,12 +749,18 @@ sim_mislabeled_data <- function (
     n_samples_per_group <- n_subjects_per_group * n_samples_per_subject
     n_samples <- 2 * n_samples_per_group
     
+    swap_handlers <- list(
+        random = genswaps_random,
+        random_with_replacement = genswaps_random_with_replacement,
+        systematic = genswaps_systematic
+    )
     swap_model <- as.character(swap_model)
     swap_model <- match.arg(swap_model)
     if (swap_model %in% c("random", "systematic") & n_mislabels %% 2 == 1) {
         warning(glue("For random and systematic modes, n_mislabels must be even. Setting n_mislabels to be {2 * floor(n_mislabels / 2)}"))
         n_mislabels <- 2 * floor(n_mislabels / 2)
     }
+    handle_swaps_function <- swap_handlers[[swap_model]] #eval(parse(text=swap_model))
     
     assert_that(
         n_subjects_per_group > 1,
@@ -859,63 +926,7 @@ sim_mislabeled_data <- function (
     
     ## Create mislabeled samples
     tsmsg(glue("Swapping samples with method: {swap_model}"))
-    handle_swaps_function <- swap_handlers[[swap_model]]
-    
-    # elist <- handle_swaps_function(elist, n_mislabels)
-    
-    # Generate swaps
-    if (swap_model == "random") {
-        correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
-        n_swaps <- floor(n_mislabels / 2)
-        swaps <- cbind(
-            swaps <- matrix(sample(correct_samples, n_swaps * 2), ncol = 2)
-        )
-        ## Apply swaps to expression matrix thus generating mislabeled samples
-        elist <- swap_elist_samples(elist, swaps)
-    } else if (swap_model == "systematic") {
-        correct_ctrl_samples <- elist$targets %>% filter(Status == "Control" & !Mislabeled) %>% pull(Sample_ID)
-        correct_case_samples <- elist$targets %>% filter(Status == "Case" & !Mislabeled) %>% pull(Sample_ID)
-        n_swaps <- floor(n_mislabels / 2)
-        swaps <- cbind(
-            sample(correct_ctrl_samples, n_swaps),
-            sample(correct_case_samples, n_swaps)
-        )
-        ## Apply swaps to expression matrix thus generating mislabeled samples
-        elist <- swap_elist_samples(elist, swaps)
-    } else if (swap_model == "random_with_replacement") {
-        n_correct_labels <- nrow(elist$targets %>% filter(!Mislabeled))
-        assert_that(n_mislabels <= n_correct_labels,
-               msg = glue("Can't generate {n_mislabels} new mislabels when there are only {n_correct_samples} correctly labeled samples"))
-        n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
-        n_goal_mislabels <- n_curr_mislabels + n_mislabels
-        n_rounds <- 0
-        while (n_curr_mislabels < n_goal_mislabels) {
-            n_new_mislabels <- n_goal_mislabels - n_curr_mislabels
-            mislabeled_samples <- elist$targets %>% filter(Mislabeled) %>% pull(Sample_ID)
-            correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
-            all_samples <- c(mislabeled_samples, correct_samples)
-            if (n_new_mislabels == 1) {
-                swaps <- cbind(
-                    sample(mislabeled_samples, 1),
-                    sample(correct_samples, 1)
-                )
-            } else if (n_new_mislabels == 2) {
-                swaps <- matrix(sample(correct_samples, 2), ncol = 2)
-            } else if (n_rounds > 5) {
-                swaps <- cbind(
-                    sample(mislabeled_samples, n_new_mislabels),
-                    sample(correct_samples, n_new_mislabels)
-                )
-            } else {
-                n_swaps <- floor(n_new_mislabels / 2)
-                swaps <- matrix(sample(all_samples, 2 * n_swaps, replace = TRUE), ncol = 2)
-            }
-            ## Apply swaps to expression matrix thus generating mislabeled samples
-            elist <- swap_elist_samples(elist, swaps)
-            n_rounds <- n_rounds + 1
-            n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
-        }
-    }
+    elist <- handle_swaps_function(elist, n_mislabels)
 
     ## Store original targets so we can access initial Sample_ID/E_Data 
     ## pairs to assess the results of the label correction algorithm
@@ -927,8 +938,30 @@ sim_mislabeled_data <- function (
 ## Function to generate simulated data, run the real time learner,
 ## and save the resulting model
 run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_matrices = FALSE) {
-    handle_mislabels <- as.character(handle_mislabels)
-    handle_mislabels <- match.arg(handle_mislabels)
+    if (is.function(handle_mislabels)) {
+        handle_mislabels_function <- handle_mislabels
+        handle_mislabels <- "[custom handler function]"
+    } else {
+        handle_mislabels <- as.character(handle_mislabels)
+        handle_mislabels <- match.arg(handle_mislabels)
+        if (!(handle_mislabels %in% handle_mislabels_options)) {
+            stop(glue("Unrecognized value for handle_mislabels: {handle_mislabels}"))
+        }
+        mislabel_handlers <- list(
+            ignore = handle_mislabels_ignore,
+            remove_oracle = handle_mislabels_remove_oracle,
+            correct_oracle = handle_mislabels_correct_oracle,
+            correct_majority_cycles = handle_mislabels_correct_majority_cycles,
+            correct_majority_swaps = handle_mislabels_correct_majority_swaps,
+            remove_majority = handle_mislabels_remove_majority,
+            correct_local_search_entropy = handle_mislabels_correct_local_search_entropy,
+            correct_majority_cycles_with_remove_majority = handle_mislabels_correct_majority_cycles_with_remove_majority,
+            correct_majority_cycles_swaps_with_remove_majority = handle_mislabels_correct_majority_cycles_swaps_with_remove_majority,
+            correct_majority_cycles_swaps_entropy_with_remove_majority = handle_mislabels_correct_majority_cycles_swaps_entropy_with_remove_majority
+        )
+        handle_mislabels_function <- mislabel_handlers[[handle_mislabels]]
+        assert_that(is.function(handle_mislabels_function))
+    }
 
     tsmsg("Simulating dataset")
     ## We simulate 2x as many subjects so we can use the 2nd half
@@ -936,7 +969,6 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
     ## entire first half.
     elist <- sim_mislabeled_data(...)
     
-    show_EList(elist)
     ## The eta matrices take up a lot of space
     if (!save_eta_matrices) {
         tsmsg("Clearing eta matrices")
@@ -944,12 +976,6 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
     }
     
     tsmsg("Handling mislabels with action: ", handle_mislabels)
-    if (handle_mislabels %in% handle_mislabels_options) {
-        handle_mislabels_function <- mislabel_handlers[[handle_mislabels]]
-    } else {
-        stop(glue("Unrecognized value for handle_mislabels: {handle_mislabels}"))
-    }
-    
     elist <- handle_mislabels_function(elist)
     
     tt <- elist$genes %>% 
@@ -1023,6 +1049,7 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
     
     return(list(tt = as_tibble(tt), label_outcomes = label_outcomes))
 }
+
 ```
 
 # Set up simulation grid
@@ -1031,13 +1058,13 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
 ## TODO: nonlinear time effect - time splines
 grid_list <- list(
     tibble(handle_mislabels = handle_mislabels_options),
-    tibble(n_mislabels = seq(from = 0, to = 300, by = 10)),
+    tibble(n_mislabels = seq(from = 60, to = 60, by = 10)),
     tibble(swap_model = handle_swaps_options),
     ## Not varying any of these
     tibble(
         n_subjects_per_group = 30,
         n_samples_per_subject = 5,
-        n_features = 1000,
+        n_features = 10,
         n_sv = 5,
         fraction_de_case = 0.5,
         case_sd = 0.1,
@@ -1057,11 +1084,13 @@ sim_table <- grid_list %>%
     distinct %>%
     filter(!(handle_mislabels == "remove" & n_mislabels >= 2 * n_subjects_per_group * n_samples_per_subject)) %>%
     arrange(seed)
-sim_table
 
 ## Comment this out later
-sim_table %<>% filter(handle_mislabels != "local_search_correct") %>% 
-    filter(!(handle_mislabels == "majority_cycles_swap_entropy_correct_and_remove" & n_mislabels > 150))
+sim_table %<>% filter(handle_mislabels == "correct_majority_cycles_swaps_entropy_with_remove_majority")
+sim_table %<>% filter(handle_mislabels != "correct_local_search_entropy") %>%
+    filter(!(handle_mislabels == "majority_cycles_swap_entropy_correct_and_remove" & n_mislabels > 130))
+
+sim_table
 ```
 
 # Run simulations
@@ -1093,6 +1122,7 @@ if (file_exists("sim_results.qs")) {
 } else {
     sim_result_table <- sim_table %>%
         mutate(
+            results_list = list(try(stop("Simulation not run yet"), silent = TRUE)),
             top_table = list(try(stop("Simulation not run yet"), silent = TRUE)),
             label_outcomes = list(try(stop("Simulation not run yet"), silent = TRUE))
         )
@@ -1100,6 +1130,8 @@ if (file_exists("sim_results.qs")) {
 
 ## To comment out once weird bug is fixed
 plan(sequential)
+plan(callr)
+time1 <- Sys.time()
 need_to_run <- sapply(sim_result_table$top_table, is, "try-error")
 if (any(need_to_run)) {
     tsmsg("Running ", sum(need_to_run), " simulations")
@@ -1111,12 +1143,12 @@ if (any(need_to_run)) {
                 do.call(future_Map, map_args)},
             top_table = lapply(results_list, \(x) try(x$tt, silent = FALSE)),
             label_outcomes = lapply(results_list, \(x) try(x$label_outcomes, silent = FALSE))
-        ) %>% select(-results_list)
+        ) # %>% select(-results_list)
     need_to_run <- sapply(sim_result_table$top_table, is, "try-error")
     assert_that(!any(need_to_run))
     qsave(sim_result_table, "sim_results.qs", nthreads = availableCores())
 }
-
+print(Sys.time() - time1)
 ```
 
 # Collect simulation results
@@ -1166,6 +1198,14 @@ sim_result_label_outcomes_table <- sim_result_table %>%
         values_from = "Num_Samples",
         values_fill = 0
     )
+label_outcome_cols <- c("mislabels_correctly_relabeled", "mislabels_removed", "mislabels_incorrectly_relabeled", 
+    "mislabels_ignored", "correct_labels_ignored", "correct_labels_incorrectly_relabeled", "correct_labels_removed")
+missing_cols <- setdiff(label_outcome_cols, names(sim_result_label_outcomes_table))
+if (length(missing_cols) != 0) {
+    for (missing_col in missing_cols) {
+        sim_result_label_outcomes_table[[missing_col]] <- 0
+    }
+}
 
 sim_result_perf_table <- sim_result_long_tt_table %>%
     filter(!is.na(Feature_Call)) %>%
@@ -1337,17 +1377,18 @@ print(boxp)
 ```{r fig.height=28, fig.width=12}
 
 n_samples <- max(2*sim_result_perf_summary_table$n_samples_per_subject*sim_result_perf_summary_table$n_subjects_per_group, na.rm=TRUE)
-mislabel_handlers_to_plot <- c("majority_remove", "majority_cycles_correct_and_remove", "majority_swap_correct", 
-                               "majority_cycles_swap_correct_and_remove", "majority_cycles_swap_entropy_correct_and_remove")
+mislabel_handlers_to_plot <- c("remove_majority", "correct_majority_cycles", "correct_majority_swaps", 
+                               "correct_majority_cycles_swaps_with_remove_majority", "correct_majority_cycles_swaps_entropy_with_remove_majority")
 mislabels_perf_names <- c("mislabels_correctly_relabeled_mean", "mislabels_removed_mean", "mislabels_ignored_mean", "mislabels_incorrectly_relabeled_mean")
 perf_names <- c(mislabels_perf_names, "correct_labels_removed_mean", "correct_labels_ignored_mean", "correct_labels_incorrectly_relabeled_mean")
 perf_yx_slope <- if_else(perf_names %in% mislabels_perf_names, 1, -1) %>%
     set_names(perf_names)
 perf_yx_intercept <- if_else(perf_names %in% mislabels_perf_names, 0, n_samples) %>%
     set_names(perf_names)
+missing_mislabel_handlers <- setdiff(mislabel_handlers_to_plot, sim_result_perf_summary_table$handle_mislabels)
 assert_that(
-    all(mislabel_handlers_to_plot %in% sim_result_perf_summary_table$handle_mislabels),
-    msg = "Specified mislabel handle methods that were not part of simulation grid")
+    length(missing_mislabel_handlers) == 0,
+    msg = glue("Attempting to plot mislabel_handlers that were not part of simulation grid: {missing_mislabel_handlers}"))
 
 p1 <- ggplot(sim_result_perf_summary_table %>% filter(handle_mislabels %in% mislabel_handlers_to_plot)) +
     aes(
@@ -1377,7 +1418,7 @@ perf_plots <- lapply(perf_names, \(pn) p1 + aes_string(y=pn) + ylim(0, n_samples
 
 p <- wrap_plots(perf_plots, ncol = 1, guides = "collect") & theme(legend.position = "top")
 print(p)
-
+with_pdf("sim_labels.pdf", print(p), width = 12, height = 4 * length(perf_names))
 ```
 
 # Charles - playing around with code
@@ -1392,17 +1433,14 @@ for (row in 1:nrow(sim_table[need_to_run, ])) {
     result <- do.call(run_sim, params) 
 }
 
-
-
-
 my_params <- as.list(sim_table[need_to_run, sim_param_names][1, ])
 elist_params <- my_params[names(my_params) != "handle_mislabels"]
 
 elist_params <- list(
   n_subjects_per_group = 30,
   n_samples_per_subject = 5,
-  n_features = 1000,
-  n_mislabels = 110,
+  n_features = 10,
+  n_mislabels = 90,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -1418,7 +1456,7 @@ elist1 <- mislabel_handlers$majority_cycles_swap_correct_and_remove(elist)
 elist <- mislabel_handlers$majority_cycles_swap_entropy_correct_and_remove(elist)
 
 sim_params <- elist_params
-sim_params$handle_mislabels <- "all_remove"
+sim_params$handle_mislabels <- "correct_majority_cycles_swap_entropy_with_remove_majority"
 results_list <- do.call(run_sim, sim_params)
 
 results_list <- do.call(run_sim, c(my_params))
@@ -1468,7 +1506,6 @@ elist_params <- list(
   seed = 1990)
 elist <- do.call(sim_mislabeled_data, elist_params)
 elist <- mislabel_handlers$majority_cycles_correct(elist)
-
 
 ## Case where no majority can be formed in a subject, so any cycle
 ## that passes through that subject cannot be resolved

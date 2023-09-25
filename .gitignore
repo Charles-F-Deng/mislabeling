@@ -3,3 +3,5 @@
 *.qs
 .DS_Store
 docs/
+data/
+
