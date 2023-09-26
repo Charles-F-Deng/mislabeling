@@ -12,6 +12,8 @@ output: html_notebook
 
 # 1. Run corrections with a seed
 # 2. Change relabel functions to swap labels and not whatever it is that I'm doing right now
+# 3. Need some indication that inferred swaps are less certain than original labels, 
+#    especially for correct_majority_swaps
 
 ```
 
@@ -250,8 +252,49 @@ detect_cycles <- function(elist) {
         i <- i + 1
     }
     ## Filter out unused indices
-    cycle_list <- cycle_list[!sapply(cycle_list,is.null)]
+    cycle_list <- cycle_list[!sapply(cycle_list, is.null)]
     return(cycle_list)
+}
+
+generate_cycles_graph <- function(elist) {
+    
+}
+
+generate_corrections_graph <- function(elist, oracle=FALSE, plot=FALSE) {
+    applied_relabels <- elist$origs$targets_orig[, c("Sample_ID", "E_Sample_ID")] %>%
+        left_join(elist$targets[, c("Sample_ID", "E_Sample_ID")], by="E_Sample_ID") %>% 
+        filter(Sample_ID.x != Sample_ID.y) %>% 
+        select(Sample_ID.x, Sample_ID.y)
+    graph <- graph_from_data_frame(applied_relabels, directed=TRUE, vertices=applied_relabels) %>% 
+        set_edge_attr("edge_colors", value="grey")
+    
+    if (oracle) {
+        oracle_relabels <- elist$origs$targets_orig[, c("Sample_ID", "E_Sample_ID")] %>% 
+            filter(Sample_ID != E_Sample_ID)
+        oracle_graph <- graph_from_data_frame(oracle_relabels, directed=TRUE, vertices=oracle_relabels) %>% 
+            set_edge_attr("is_in_oracle", value=TRUE)
+        
+        applied_graph <- graph %>% 
+            set_edge_attr("is_in_applied", value=TRUE)
+        
+        graph <- graph.union(applied_graph, oracle_graph, byname=TRUE)
+        E(graph)[is.na(E(graph)$is_in_oracle)]$is_in_oracle <- FALSE
+        E(graph)[is.na(E(graph)$is_in_applied)]$is_in_applied <- FALSE
+        graph <- set_edge_attr(graph, name="is_in_both", value=E(graph)$is_in_applied & E(graph)$is_in_oracle)
+        
+        # Set graph colors
+        edge_colors <- ifelse(E(graph)$is_in_both, "forestgreen", ifelse(E(graph)$is_in_oracle, "orange", "red"))
+        graph <- set_edge_attr(graph, name="edge_colors", value=edge_colors)
+    }
+    
+    if (plot) {
+        layout_custom <- layout_nicely(graph, maxiter=1000)
+        graph_plot <- plot(graph, vertex.size=5, vertex.label.cex=0.6, edge.arrow.size=.3, 
+             edge.color=E(graph)$edge_colors, vertex.label.color="black", vertex.frame.color="transparent", layout=layout_custom)
+        print(graph_plot)
+    }
+    
+    return(graph)
 }
 
 ```
@@ -406,22 +449,22 @@ calc_entropy = function(labels) {
         sum()
 }
 
-calc_delta_entropy = function(swap_from, swap_to) {
-    filtered_genotypes <- elist_labels %>%
-        filter(Sample_ID %in% c(swap_from, swap_to)) %>%
-        pull(E_Subject_ID)
-    filtered_labels <- elist_labels %>% filter(E_Subject_ID %in% filtered_genotypes)
-    swap_from_genotype <- filtered_labels[[swap_from, "E_Subject_ID"]]
-    swap_to_genotype <- filtered_labels[[swap_to, "E_Subject_ID"]]
-    swapped_labels <- filtered_labels
-    swapped_labels[swap_from, "E_Subject_ID"] <- swap_to_genotype
-    swapped_labels[swap_to, "E_Subject_ID"] <- swap_from_genotype
-    return(calc_entropy(swapped_labels) - calc_entropy(filtered_labels))
-}
-
 objective_genotype_entropy <- function(elist, neighbors) {
-    elist_labels <- elist$targets[, c("Sample_ID", "Subject_ID", "E_Subject_ID")]
-    elist_entropy <- calc_entropy(elist_labels)
+    elist_entropy <- calc_entropy(elist$targets)
+    
+    calc_delta_entropy = function(swap_from, swap_to) {
+        filtered_genotypes <- elist$targets %>%
+            filter(Sample_ID %in% c(swap_from, swap_to)) %>%
+            pull(E_Subject_ID)
+        filtered_labels <- elist$targets %>% 
+            filter(E_Subject_ID %in% filtered_genotypes)
+        swap_from_genotype <- filtered_labels[[swap_from, "E_Subject_ID"]]
+        swap_to_genotype <- filtered_labels[[swap_to, "E_Subject_ID"]]
+        swapped_labels <- filtered_labels
+        swapped_labels[swap_from, "E_Subject_ID"] <- swap_to_genotype
+        swapped_labels[swap_to, "E_Subject_ID"] <- swap_from_genotype
+        return(calc_entropy(swapped_labels) - calc_entropy(filtered_labels))
+    }
     
     neighbors %<>% mutate(
         base_entropy = elist_entropy,
@@ -430,15 +473,18 @@ objective_genotype_entropy <- function(elist, neighbors) {
     )
     return(neighbors)
 }
+# search_objectives <- list(
+#     genotype_entropy = objective_genotype_entropy
+# )
+# objective_options <- names(search_objectives)
 
-search_objectives <- list(
-    genotype_entropy = objective_genotype_entropy
-)
-objective_options <- names(search_objectives)
+local_search_correct <- function(elist, objective) {
 
-local_search_correct <- function(elist, objective=objective_options) {
+    search_objectives <- list(
+        genotype_entropy = objective_genotype_entropy
+    )
     objective <- as.character(objective)
-    objective <- match.arg(objective)
+    objective <- match.arg(objective, names(search_objectives))
     if (objective %in% objective_options) {
         objective_function <- search_objectives[[objective]]
     } else {
@@ -1440,7 +1486,7 @@ elist_params <- list(
   n_subjects_per_group = 30,
   n_samples_per_subject = 5,
   n_features = 10,
-  n_mislabels = 90,
+  n_mislabels = 80,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -1452,11 +1498,12 @@ elist_params <- list(
   swap_model = "random_with_replacement",
   seed = 1986)
 elist <- do.call(sim_mislabeled_data, elist_params)
-elist1 <- mislabel_handlers$majority_cycles_swap_correct_and_remove(elist)
-elist <- mislabel_handlers$majority_cycles_swap_entropy_correct_and_remove(elist)
+elist <- mislabel_handlers$correct_local_search_entropy(elist)
+elist <- mislabel_handlers$correct_majority_cycles_with_remove_majority(elist)
+elist <- mislabel_handlers$correct_majority_cycles_swaps_entropy_with_remove_majority(elist)
 
 sim_params <- elist_params
-sim_params$handle_mislabels <- "correct_majority_cycles_swap_entropy_with_remove_majority"
+sim_params$handle_mislabels <- "correct_majority_cycles_swaps_entropy_with_remove_majority"
 results_list <- do.call(run_sim, sim_params)
 
 results_list <- do.call(run_sim, c(my_params))
