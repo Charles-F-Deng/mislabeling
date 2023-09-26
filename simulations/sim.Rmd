@@ -256,10 +256,6 @@ detect_cycles <- function(elist) {
     return(cycle_list)
 }
 
-generate_cycles_graph <- function(elist) {
-    
-}
-
 generate_corrections_graph <- function(elist, oracle=FALSE, plot=FALSE) {
     applied_relabels <- elist$origs$targets_orig[, c("Sample_ID", "E_Sample_ID")] %>%
         left_join(elist$targets[, c("Sample_ID", "E_Sample_ID")], by="E_Sample_ID") %>% 
