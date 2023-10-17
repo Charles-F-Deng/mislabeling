@@ -426,11 +426,8 @@ genotype_vote <- function(connected_component) {
     return(votes)
 }
 
-# 1. For each Genotype, determine the unique Majority_Subject_ID
-# 2. For each Subject_ID, determine unique Majority_Genotype_ID
-# 3. Find the Genotype/Subject_ID pairs where these two counts intersect
-get_majority_majority_relabels_graph <- function(elist) {
-    votes <- genotype_vote(elist$targets)
+get_majority_majority_pairs <- function(connected_component) {
+    votes <- genotype_vote(connected_component)
     votes_by_genotype <- data.frame(
         Genotype_ID = rownames(votes),
         Max_Subject_ID = colnames(votes)[apply(votes, 1, which.max)],
@@ -456,6 +453,14 @@ get_majority_majority_relabels_graph <- function(elist) {
         rename(Genotype_ID = Max_Genotype_ID) %>% 
         select(Subject_ID, Genotype_ID)
     putative_subjects <- inner_join(votes_by_subject, votes_by_genotype, by=c("Subject_ID", "Genotype_ID"))
+    return(putative_subjects)
+}
+
+# 1. For each Genotype, determine the unique Majority_Subject_ID
+# 2. For each Subject_ID, determine unique Majority_Genotype_ID
+# 3. Find the Genotype/Subject_ID pairs where these two counts intersect
+get_majority_majority_relabels_graph <- function(elist) {
+    putative_subjects <- get_majority_majority_pairs(elist$targets)
     assert_that(!any(duplicated(putative_subjects$Subject_ID)) &
                 !any(duplicated(putative_subjects$Genotype_ID)),
                 msg="Non-unique Subject_ID/Genotype_ID pair")
@@ -489,14 +494,6 @@ get_majority_majority_relabels_graph <- function(elist) {
     }
     relabels_graph <- graph_from_adjacency_matrix(relabel_adj_matrix, mode="directed")
     return(relabels_graph)
-}
-
-##################################################################
-################    SUBJECT_ID/GENOTYPE SEARCH    ################
-##################################################################
-
-subject_genotype_search <- function(connected_component, lock_majority_majority=TRUE) {
-    
 }
 
 ##################################################################
@@ -739,7 +736,6 @@ handle_mislabels_correct_oracle <- function(elist) {
     return(reorder_elist_samples(elist, elist$targets$Sample_ID))
 }
 
-## FIX THIS
 ## Remove all samples where the labeled Subject_ID doesn't match the majority 
 ## Subject_ID in its genotype groupset
 handle_mislabels_remove_majority <- function(elist) {
@@ -801,7 +797,13 @@ handle_mislabels_correct_majority_swaps <- function(elist) {
     for (vertex in unambiguous_vertices) {
         unambiguous_neighbors <- c(unambiguous_neighbors, names(neighbors(relabels_graph, vertex, "out")))
     }
+    unambiguous_neighbors <- setdiff(unambiguous_neighbors, unambiguous_vertices)
     unambiguous_relabels_graph <- subgraph(relabels_graph, union(unambiguous_vertices, unambiguous_neighbors))
+    # Delete outgoing edges from the neighbors
+    for (vertex in unambiguous_neighbors) {
+        out_edges <- E(unambiguous_relabels_graph)[.from(vertex)]  # Get outgoing edges from the vertex
+        unambiguous_relabels_graph <- delete_edges(unambiguous_relabels_graph, out_edges)       # Delete the outgoing edges
+    }
     
     ## Force cycle closures
     relabels_graph <- unambiguous_relabels_graph
@@ -860,7 +862,7 @@ handle_mislabels_correct_local_search_entropy <- function(elist, n_iter=5) {
     return(local_search_correct(elist, objective="genotype_entropy", n_iter=n_iter))
 }
 
-handle_mislabels_correct_main_with_remove_majority <- function(elist, n_iter=1, max_subjects=9, n_set=10) {
+handle_mislabels_correct_main_with_remove_majority <- function(elist, n_iter=3, max_subjects=9, n_set=10) {
     curr_set <- 0
     while (curr_set < n_set) {
         elist <- handle_mislabels_comprehensive_search(elist, max_subjects=max_subjects)
@@ -869,7 +871,7 @@ handle_mislabels_correct_main_with_remove_majority <- function(elist, n_iter=1, 
         elist <- handle_mislabels_correct_majority_swaps(elist)
         elist <- handle_mislabels_comprehensive_search(elist, max_subjects=max_subjects)
         if (calc_label_genotype_hamming_distance(elist) == 0) break
-        elist <- handle_mislabels_correct_local_search_entropy(elist, n_iter=n_iter)
+        elist <- handle_mislabels_correct_local_search_entropy(elist, n_iter=4)
         curr_set <- curr_set + 1
     }
     elist <- handle_mislabels_remove_majority(elist)
