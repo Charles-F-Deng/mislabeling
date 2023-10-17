@@ -415,8 +415,8 @@ handle_swaps_options <- names(swap_handlers)
 ###################         HEURISTICS         ###################
 ##################################################################
 
-genotype_vote <- function(elist) {
-    votes <- elist$targets %>% 
+genotype_vote <- function(connected_component) {
+    votes <- connected_component %>% 
         group_by(Subject_ID, Genotype_ID) %>% 
         summarize(n=n(), .groups='drop') %>% 
         pivot_wider(names_from=Subject_ID, values_from=n) %>% 
@@ -430,7 +430,7 @@ genotype_vote <- function(elist) {
 # 2. For each Subject_ID, determine unique Majority_Genotype_ID
 # 3. Find the Genotype/Subject_ID pairs where these two counts intersect
 get_majority_majority_relabels_graph <- function(elist) {
-    votes <- genotype_vote(elist)
+    votes <- genotype_vote(elist$targets)
     votes_by_genotype <- data.frame(
         Genotype_ID = rownames(votes),
         Max_Subject_ID = colnames(votes)[apply(votes, 1, which.max)],
@@ -492,6 +492,14 @@ get_majority_majority_relabels_graph <- function(elist) {
 }
 
 ##################################################################
+################    SUBJECT_ID/GENOTYPE SEARCH    ################
+##################################################################
+
+subject_genotype_search <- function(connected_component, lock_majority_majority=TRUE) {
+    
+}
+
+##################################################################
 ###################    COMPREHENSIVE SEARCH    ###################
 ##################################################################
 
@@ -508,6 +516,10 @@ compute_min_mislabels <- function(connected_component) {
 
 min_swaps_comprehensive_search <- function(connected_component) {
     ## What if number of genotype groups doesn't match number of unique subjects?
+    ## For now just pass out of it
+    if (length(unique(connected_component$Genotype_ID)) != length(unique(connected_component$Subject_ID))) {
+        return(data.frame(relabel_from=character(0), relabel_to=character(0)))
+    }
     perm_genotypes <- t(simplify2array(permn(unique(connected_component$Subject_ID))))
     colnames(perm_genotypes) <- sort(unique(connected_component$Genotype_ID))
     
@@ -605,6 +617,7 @@ calc_entropy = function(labels) {
 calc_label_genotype_hamming_distance = function(elist) {
     labels_graph <- generate_graph(elist, "label")
     genotype_graph <- generate_graph(elist, "genotype")
+    int_graph <- graph.intersection(labels_graph, genotype_graph)
     return(ecount(labels_graph) + ecount(genotype_graph) - 2*ecount(int_graph))
 }
 
@@ -847,7 +860,7 @@ handle_mislabels_correct_local_search_entropy <- function(elist, n_iter=5) {
     return(local_search_correct(elist, objective="genotype_entropy", n_iter=n_iter))
 }
 
-handle_mislabels_correct_main_with_remove_majority <- function(elist, n_iter=1, n_set=10, max_subjects=9) {
+handle_mislabels_correct_main_with_remove_majority <- function(elist, n_iter=1, max_subjects=9, n_set=10) {
     curr_set <- 0
     while (curr_set < n_set) {
         elist <- handle_mislabels_comprehensive_search(elist, max_subjects=max_subjects)
@@ -855,6 +868,7 @@ handle_mislabels_correct_main_with_remove_majority <- function(elist, n_iter=1, 
         elist <- handle_mislabels_comprehensive_search(elist, max_subjects=max_subjects)
         elist <- handle_mislabels_correct_majority_swaps(elist)
         elist <- handle_mislabels_comprehensive_search(elist, max_subjects=max_subjects)
+        if (calc_label_genotype_hamming_distance(elist) == 0) break
         elist <- handle_mislabels_correct_local_search_entropy(elist, n_iter=n_iter)
         curr_set <- curr_set + 1
     }
@@ -1794,7 +1808,7 @@ elist_params <- list(
   n_subjects_per_group = 100,
   n_samples_per_group = 300,
   n_features = 10,
-  n_mislabels = 150,
+  n_mislabels = 250,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
