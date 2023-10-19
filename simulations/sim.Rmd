@@ -89,7 +89,8 @@ reorder_elist_samples <- function(elist, sample_ids) {
         E_Subject_ID = str_extract(sample_ids, rex(start, not("_"))),
         ## this is hacky, will fix this when we swap labels instead of whatever it is I'm doing now
         Genotype_ID = str_c("Genotype_", as.character(as.numeric(factor(E_Subject_ID)))),
-        Mislabeled = !(Sample_ID == E_Sample_ID)
+        Mislabeled = !(Sample_ID == E_Sample_ID),
+        Mislabeled_Subject = !(Subject_ID == E_Subject_ID)
     )
     return(reordered_elist)
 }
@@ -229,7 +230,7 @@ plot_graph <- function(graph) {
     print(graph_plot)
 }
 
-generate_graph = function(elist, graph_type=names(graph_type_mapping), oracle=FALSE, plot=FALSE) {
+generate_graph = function(elist, graph_type=names(graph_type_mapping), oracle=FALSE, plot=FALSE, filter=FALSE) {
     graph_type_mapping <- list(
         label = "Subject_ID",
         genotype = "Genotype_ID",
@@ -240,6 +241,7 @@ generate_graph = function(elist, graph_type=names(graph_type_mapping), oracle=FA
     if (!(graph_type %in% names(graph_type_mapping))) { 
         stop(glue("Unrecognized value for graph_type: {graph_type}"))
     }
+    if (!(oracle & graph_type=="combined")) {filter <- FALSE}
     
     if (graph_type == "combined") {
         genotype_graph <- generate_graph(elist, "genotype", oracle=oracle) %>% 
@@ -253,7 +255,19 @@ generate_graph = function(elist, graph_type=names(graph_type_mapping), oracle=FA
         E(graph)$edge_colors <- ifelse(E(graph)$is_in_both, "green", ifelse(E(graph)$is_in_genotype, "orange", "cornflowerblue"))
         if (oracle) {
             V(graph)$Mislabeled <- elist$targets[V(graph)$name, "Mislabeled"]
-            V(graph)$vertex_colors <- ifelse(V(graph)$Mislabeled, "firebrick2", "forestgreen")
+            V(graph)$Mislabeled_Subject <- elist$targets[V(graph)$name, "Mislabeled_Subject"]
+            V(graph)$vertex_colors <- ifelse(V(graph)$Mislabeled_Subject, "firebrick2", 
+                                             ifelse(V(graph)$Mislabeled, "orchid", "forestgreen"))
+        }
+        if (filter) {
+            V(graph)$Component_ID <- clusters(graph)$membership
+            components_to_plot <- get.data.frame(graph, what="vertices") %>% 
+                group_by(Component_ID) %>% 
+                summarize(n_Mislabeled=sum(Mislabeled)) %>% 
+                filter(n_Mislabeled > 0) %>% 
+                pull(Component_ID)
+            vertices_to_plot <- names(V(graph)[V(graph)$Component_ID %in% components_to_plot])
+            graph <- subgraph(graph, vertices_to_plot)
         }
         if (plot) { 
             plot_graph(graph) 
@@ -283,7 +297,9 @@ generate_graph = function(elist, graph_type=names(graph_type_mapping), oracle=FA
     
     if (oracle) {
         V(graph)$Mislabeled <- elist$targets[V(graph)$name, "Mislabeled"]
-        V(graph)$vertex_colors <- ifelse(V(graph)$Mislabeled, "firebrick2", "forestgreen")
+        V(graph)$Mislabeled_Subject <- elist$targets[V(graph)$name, "Mislabeled_Subject"]
+        V(graph)$vertex_colors <- ifelse(V(graph)$Mislabeled_Subject, "firebrick2", 
+                                         ifelse(V(graph)$Mislabeled, "orchid", "forestgreen"))
     }
     if (plot) {
         plot_graph(graph) 
@@ -493,6 +509,8 @@ get_majority_majority_relabels_graph <- function(elist) {
         }
     }
     relabels_graph <- graph_from_adjacency_matrix(relabel_adj_matrix, mode="directed")
+    ## Filter out samples that have no edges
+    relabels_graph <- subgraph(relabels_graph, V(relabels_graph)[degree(relabels_graph, mode="all") > 0])
     return(relabels_graph)
 }
 
@@ -795,6 +813,7 @@ handle_mislabels_correct_majority_swaps <- function(elist) {
     unambiguous_vertices <- names(V(relabels_graph)[degree(relabels_graph, mode="out") == 1])
     unambiguous_neighbors <- NULL
     for (vertex in unambiguous_vertices) {
+        print()
         unambiguous_neighbors <- c(unambiguous_neighbors, names(neighbors(relabels_graph, vertex, "out")))
     }
     unambiguous_neighbors <- setdiff(unambiguous_neighbors, unambiguous_vertices)
@@ -871,7 +890,7 @@ handle_mislabels_correct_main_with_remove_majority <- function(elist, n_iter=3, 
         elist <- handle_mislabels_correct_majority_swaps(elist)
         elist <- handle_mislabels_comprehensive_search(elist, max_subjects=max_subjects)
         if (calc_label_genotype_hamming_distance(elist) == 0) break
-        elist <- handle_mislabels_correct_local_search_entropy(elist, n_iter=4)
+        elist <- handle_mislabels_correct_local_search_entropy(elist, n_iter=2)
         curr_set <- curr_set + 1
     }
     elist <- handle_mislabels_remove_majority(elist)
@@ -1038,7 +1057,8 @@ sim_mislabeled_data <- function (
             E_Sample_ID = Sample_ID,
             E_Subject_ID = Subject_ID,
             Genotype_ID = str_c("Genotype_", as.character(as.numeric(factor(E_Subject_ID)))),
-            Mislabeled = FALSE
+            Mislabeled = FALSE,
+            Mislabeled_Subject = FALSE
         ) %>% 
         select(-n_samples) %>% 
         relocate(Sample_ID)
@@ -1217,7 +1237,7 @@ run_sim <- function(..., handle_mislabels = handle_mislabels_options, save_eta_m
         mutate(logFC = NA_real_, AveExpr = NA_real_, t = NA_real_, P.Value = NA_real_, adj.P.Val = NA_real_)
     
     label_outcomes <- elist$origs$targets_orig %>%
-        select( Sample_ID, E_Sample_ID, Mislabeled ) %>% 
+        select(Sample_ID, E_Sample_ID, Mislabeled) %>% 
         ## Need to specify dplyr rename or for some reason it fails in future_Map
         dplyr::rename(
             E_Sample_ID_orig = E_Sample_ID,
@@ -1807,10 +1827,10 @@ elist_params <- my_params[names(my_params) != "handle_mislabels"]
 elist <- do.call(sim_mislabeled_data, elist_params)
 
 elist_params <- list(
-  n_subjects_per_group = 100,
-  n_samples_per_group = 300,
+  n_subjects_per_group = 30,
+  n_samples_per_group = 120,
   n_features = 10,
-  n_mislabels = 250,
+  n_mislabels = 40,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -1820,7 +1840,7 @@ elist_params <- list(
   sv_sd = 0.1,
   resid_sd = 0.05,
   swap_model = "random_with_replacement",
-  seed = 1987)
+  seed = 1988)
 elist <- do.call(sim_mislabeled_data, elist_params)
 elist <- mislabel_handlers$correct_majority_swaps(elist)
 elist <- mislabel_handlers$correct_comprehensive_search(elist)
