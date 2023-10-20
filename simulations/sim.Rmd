@@ -223,7 +223,7 @@ max_component_subject_ids <- function(elist) {
 plot_graph <- function(graph) {
     edge_colors <- if (!is.null(E(graph)$edge_colors)) E(graph)$edge_colors else "grey"
     vertex_colors <- if (!is.null(V(graph)$vertex_colors)) V(graph)$vertex_colors else "orange2"
-    layout_custom <- layout_nicely(graph)
+    layout_custom <- with_seed(layout_nicely(graph), seed=1987)
     graph_plot <- plot(graph, vertex.size=3, vertex.label.cex=0.6, edge.arrow.size=.8, 
                        edge.color=edge_colors, vertex.color=vertex_colors, vertex.label.color="black", 
                        vertex.frame.color="transparent", layout=layout_custom)
@@ -677,7 +677,10 @@ objective_hamming_distance <- function(elist, neighbors) {
     )
 }
 
-local_search_correct <- function(elist, objective, n_iter=3) {
+## If filter_concordant_vertices is true, filter out any vertices that have green edges 
+## This should sleep up the search drastically, but misses cases where 2 samples from the same genotype
+## are mislabeled into the same incorrect subject
+local_search_correct <- function(elist, objective, n_iter=3, filter_concordant_vertices=TRUE) {
     search_objectives <- list(
         genotype_entropy = objective_genotype_entropy,
         hamming_distance = objective_hamming_distance
@@ -693,8 +696,19 @@ local_search_correct <- function(elist, objective, n_iter=3) {
 
     ## For any objective, the only improving swaps involve 2 samples connected
     ## to a common sample but not each other. One has a genotype edge and one a label edge
-    find_neighbors = function(graph) {
-        graph_distances <- distances(graph)
+    find_neighbors <- function(combined_graph) {
+        v_filtered <- V(combined_graph)
+        if (filter_concordant_vertices) {
+            v_filtered <- NULL
+            for (v in V(combined_graph)) {
+                v_neighbors <- neighbors(combined_graph, v)
+                concordant_edge_count <- sum(E(combined_graph)[v %--% v_neighbors]$is_in_both)
+                if (concordant_edge_count == 0) {
+                    v_filtered <- c(v_filtered, v)
+                }
+            }
+        }
+        graph_distances <- distances(combined_graph, v=v_filtered, to=v_filtered)
         dist_equals_2 <- graph_distances == 2
         row_indices <- row(dist_equals_2)[dist_equals_2]
         col_indices <- col(dist_equals_2)[dist_equals_2]
@@ -813,7 +827,6 @@ handle_mislabels_correct_majority_swaps <- function(elist) {
     unambiguous_vertices <- names(V(relabels_graph)[degree(relabels_graph, mode="out") == 1])
     unambiguous_neighbors <- NULL
     for (vertex in unambiguous_vertices) {
-        print()
         unambiguous_neighbors <- c(unambiguous_neighbors, names(neighbors(relabels_graph, vertex, "out")))
     }
     unambiguous_neighbors <- setdiff(unambiguous_neighbors, unambiguous_vertices)
@@ -890,7 +903,7 @@ handle_mislabels_correct_main_with_remove_majority <- function(elist, n_iter=3, 
         elist <- handle_mislabels_correct_majority_swaps(elist)
         elist <- handle_mislabels_comprehensive_search(elist, max_subjects=max_subjects)
         if (calc_label_genotype_hamming_distance(elist) == 0) break
-        elist <- handle_mislabels_correct_local_search_entropy(elist, n_iter=2)
+        elist <- handle_mislabels_correct_local_search_entropy(elist, n_iter=1)
         curr_set <- curr_set + 1
     }
     elist <- handle_mislabels_remove_majority(elist)
@@ -1827,10 +1840,10 @@ elist_params <- my_params[names(my_params) != "handle_mislabels"]
 elist <- do.call(sim_mislabeled_data, elist_params)
 
 elist_params <- list(
-  n_subjects_per_group = 30,
-  n_samples_per_group = 120,
+  n_subjects_per_group = 500,
+  n_samples_per_group = 2000,
   n_features = 10,
-  n_mislabels = 40,
+  n_mislabels = 1000,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
