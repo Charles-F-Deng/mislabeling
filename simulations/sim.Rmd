@@ -6,6 +6,8 @@ output: html_notebook
 
 ```{r}
 
+setwd("/Users/charlesdeng/Workspace/mislabeling/simulations")
+getwd()
 ## Small TODOs:
 
 # 1. Run corrections with a seed
@@ -62,6 +64,7 @@ library(future)
 library(future.apply)
 library(future.callr)
 library(combinat)
+library(openxlsx)
 library(tibble)
 column_to_rownames <- tibble::column_to_rownames
 rownames_to_column <- tibble::rownames_to_column
@@ -290,14 +293,27 @@ validate_relabels <- function(sample_genotype_data, relabels) {
     )
 }
 
+get_unsolved_components <- function(sample_genotype_data) {
+    validate_sample_genotype_data(sample_genotype_data)
+    solved_components <- sample_genotype_data %>% 
+        group_by(Component_ID) %>% 
+        summarize(
+            n_Subject = length(unique(Subject_ID)),
+            n_Genotype_Group = length(unique(Genotype_Group_ID))
+        ) %>% 
+        filter(n_Subject == 1 & n_Genotype_Group == 1) %>% 
+        pull(Component_ID)
+    return(setdiff(unique(sample_genotype_data$Component_ID), solved_components))
+}
+
 plot_graph <- function(graph) {
     edge_colors <- if (!is.null(E(graph)$edge_colors)) E(graph)$edge_colors else "grey"
     vertex_colors <- if (!is.null(V(graph)$vertex_colors)) V(graph)$vertex_colors else "orange"
     layout_custom <- with_seed(layout_nicely(graph), seed=1987)
-    my_plot <- plot(graph, vertex.size=3, vertex.label.cex=0.6, edge.arrow.size=.8, 
+    my_plot <- plot(graph, vertex.size=4, vertex.label.cex=2, edge.arrow.size=.8, edge.width=5, 
                        edge.color=edge_colors, vertex.color=vertex_colors, vertex.label.color="black", 
                        vertex.frame.color="transparent", layout=layout_custom)
-    print(my_plot)
+    return(my_plot)
 }
 
 graph_type_mapping <- list(
@@ -355,7 +371,7 @@ generate_graph = function(sample_genotype_data, graph_type=names(graph_type_mapp
     }
     
     if (graph_type == "combined") {
-        E(graph)$edge_colors <- ifelse(E(graph)$concordant, "green", ifelse(E(graph)$genotypes, "orange", "cornflowerblue"))
+        E(graph)$edge_colors <- ifelse(E(graph)$concordant, "forestgreen", ifelse(E(graph)$genotypes, "orange", "cornflowerblue"))
     } else if (graph_type == "label") {
         E(graph)$edge_colors <- "cornflowerblue"
     } else {
@@ -370,7 +386,7 @@ generate_graph = function(sample_genotype_data, graph_type=names(graph_type_mapp
 
 ## TODO: show removals as well
 generate_corrections_graph <- function(sample_genotype_data, plot=FALSE) {
-    validate_sample_genotype_data(sample_genotype_data, init_sample_label_required=TRUE)
+    validate_sample_genotype_data(sample_genotype_data, init_required=TRUE)
     applied_relabels <- sample_genotype_data[, c("Init_Sample_ID", "Sample_ID")] %>% 
         filter(Sample_ID != Init_Sample_ID & !is.na(Sample_ID))
     graph <- graph_from_data_frame(applied_relabels, directed=TRUE)
@@ -766,40 +782,200 @@ correct_majority_cycles <- function(sample_genotype_data) {
     putative_subjects <- get_majority_majority_pairs(sample_genotype_data)
     relabels_graph <- generate_relabels_graph_from_putative_subjects(sample_genotype_data, putative_subjects)
     majority_cycle_relabels <- relabel_cycles(relabels_graph)
-    validate_relabels(sample_genotype_data, majority_cycle_relabels)
     sample_genotype_data <- relabel_sample_genotype_data(sample_genotype_data, majority_cycle_relabels)
     return(sample_genotype_data)
 }
 
-correct_comprehensive_search <- function(sample_genotype_data, ...) {
-    combined_graph <- generate_graph(sample_genotype_data, graph_type="combined")
-    sample_genotype_data %<>% 
-        mutate(
-            Temp_Component_ID = str_c("Temp_Component_", clusters(combined_graph)$membership)
-        )
-    temp_component_ids <- unique(sample_genotype_data$Temp_Component_ID)
+correct_comprehensive_search <- function(sample_genotype_data, max_subjects=9) {
     relabels <- data.frame(relabel_from=character(0), relabel_to=character(0))
-    for (temp_component_id in temp_component_ids) {
-        connected_component <- sample_genotype_data %>% filter(Temp_Component_ID == temp_component_id)
+    components <- unique(sample_genotype_data$Component_ID)
+    for (component_id in components) {
+        connected_component <- sample_genotype_data %>% filter(Component_ID == component_id)
         ## The connected component is fully resolved if there's exactly one Subject_ID and one Genotype_Group_ID
         if (length(unique(connected_component$Subject_ID)) == 1 & length(unique(connected_component$Genotype_Group_ID)) == 1) {
             next
         }
         if (length(unique(connected_component$Subject_ID)) <= max_subjects) {
-            curr_relabels <- min_swaps_comprehensive_search(connected_component, ...)
+            curr_relabels <- min_swaps_comprehensive_search(connected_component)
             relabels <- rbind(relabels, curr_relabels)
         }
     }
-    sample_genotype_data %<>% select(-Temp_Component_ID)
     sample_genotype_data <- relabel_sample_genotype_data(sample_genotype_data, relabels)
     return(sample_genotype_data)
 }
 
+## TODO: make an ensemble
 correct_local_search_entropy <- function(sample_genotype_data, ...) {
     return(local_search_correct(sample_genotype_data, "genotype_entropy", ...))
 }
 
-correct_ensemble <- function()
+correct_main <- function(sample_genotype_data) {
+    validate_sample_genotype_data(sample_genotype_data)
+    
+    ## Assign a Component_ID for each connected component in the graph
+    combined_graph <- generate_graph(sample_genotype_data, graph_type="combined")
+    components <- clusters(combined_graph)$membership
+    component_sizes <- table(components)
+    sorted_components <- order(component_sizes, decreasing=TRUE)
+    ordered_components <- rep(NA_integer_, length(components))
+    for (i in seq_along(sorted_components)) {
+        formatted_component <- sprintf("%0*d", digits(length(component_sizes)), i)
+        ordered_components[components == sorted_components[i]] <- glue("Component_", formatted_component)
+    }
+    sample_genotype_data %<>% mutate(
+        Component_ID = ordered_components,
+        Init_Sample_ID = Sample_ID,
+        Init_Subject_ID = Subject_ID,
+        Init_Component_ID = ordered_components
+    )
+    orig_sample_genotype_data <- sample_genotype_data
+    unsolved_components <- sort(get_unsolved_components(orig_sample_genotype_data))
+    
+    while (TRUE) {
+        sample_genotype_data <- correct_comprehensive_search(sample_genotype_data)
+        if (objective_hamming_distance(sample_genotype_data) == 0) break
+        sample_genotype_data <- correct_majority_cycles(sample_genotype_data)
+        if (objective_hamming_distance(sample_genotype_data) == 0) break
+        sample_genotype_data <- correct_majority_cycles(sample_genotype_data)
+        if (objective_hamming_distance(sample_genotype_data) == 0) break
+        sample_genotype_data <- correct_local_search_entropy(sample_genotype_data, n_iter=1)
+        if (objective_hamming_distance(sample_genotype_data) == 0) break
+    }
+    
+    ##########################################################    
+    ##########          Summary statistics          ##########
+    ##########################################################
+    sample_summary <- sample_genotype_data %>%
+        group_by(Genotype_Group_ID, Init_Subject_ID) %>% 
+        mutate(n_agree=n()) %>% 
+        ungroup(Init_Subject_ID) %>%
+        mutate(n_Genotype_Group=n()) %>% 
+        ungroup(Genotype_Group_ID) %>% 
+        transmute(
+            Component_ID = Init_Component_ID,
+            Genotype_Group_ID,
+            Init_Subject_ID,
+            Init_Sample_ID,
+            Final_Subject_ID = Subject_ID,
+            Final_Sample_ID = Sample_ID,
+            n_Genotype_Group,
+            Init_Agreement = paste0(n_agree-1, " out of ", n_Genotype_Group - 1),
+            Status = case_when(
+                is.na(Final_Sample_ID) ~ "removed",
+                Init_Sample_ID != Final_Sample_ID ~ "corrected",
+                n_Genotype_Group == 1 ~ "ignored_single-sample",
+                n_agree < 2 ~ "ignored",
+                TRUE ~ "validated"
+            )
+        ) %>% 
+        arrange(Component_ID, Genotype_Group_ID, Final_Subject_ID, Final_Sample_ID)
+    corrections_graph <- generate_corrections_graph(sample_genotype_data)
+    cluster_info <- clusters(corrections_graph)
+    cluster_sizes <- cluster_info$csize[cluster_info$membership]
+    names(cluster_sizes) <- names(cluster_info$membership)
+    sample_summary$Mislabel_Type <- NA_character_
+    sample_summary[sample_summary$Init_Sample_ID %in% names(cluster_sizes), "Mislabel_Type"] = as.character(cluster_sizes)
+    sample_summary %<>% mutate(
+        Mislabel_Type = ifelse(
+            is.na(Mislabel_Type),
+            Mislabel_Type,
+            ifelse(
+                Mislabel_Type == "2", 
+                "Swap",
+                paste0(Mislabel_Type, "-cycle")
+            )
+        )
+    )
+    ambiguities <- sample_summary %>% 
+        filter(Status == "corrected") %>% 
+        select(Final_Subject_ID, Final_Sample_ID) %>% 
+        group_by(Final_Subject_ID) %>% 
+        mutate(n = n()) %>% 
+        filter(n > 1) %>% 
+        ungroup()
+    ambiguities$Ambiguities <- NULL
+    for (i in 1:nrow(ambiguities)) {
+        sample_id <- ambiguities[i, "Final_Sample_ID"][[1]]
+        subject_id <- ambiguities[i, "Final_Subject_ID"][[1]]
+        sample_ambiguities <- ambiguities %>% 
+            filter(
+                Final_Subject_ID == subject_id,
+                Final_Sample_ID != sample_id
+            ) %>% 
+            pull(Final_Sample_ID)
+        ambiguities[i, "Ambiguities"] <- paste(sample_ambiguities, collapse=", ")
+    }
+    ambiguities %<>% select(Final_Sample_ID, Ambiguities)
+    sample_summary %<>% left_join(ambiguities, by="Final_Sample_ID")
+    
+    genotype_group_summary <- sample_summary %>% 
+        group_by(Genotype_Group_ID) %>% 
+        summarize(
+            Inferred_Subject_ID = names(sort(table(Final_Subject_ID), decreasing = TRUE)[1]),
+            n_Samples_validated = sum(Status == "validated"),
+            n_Samples_corrected = sum(Status == "corrected"),
+            n_Samples_removed = sum(Status == "removed"),
+            n_Samples_ignored = sum(str_detect(Status, "^ignored")),
+            n_Samples_total = n(),
+            ## TODO fix this more rigorously
+            Init_Fraction_Match = paste0(n_Samples_validated + n_Samples_ignored, " out of ", n_Samples_total)
+        ) %>% 
+        ungroup() %>% 
+        select(Genotype_Group_ID, Inferred_Subject_ID, Init_Fraction_Match, everything())
+    
+    component_summary <- sample_summary %>% 
+        group_by(Component_ID) %>% 
+        summarize(
+            n_Genotype_Groups = length(unique(Genotype_Group_ID)),
+            n_Subjects = length(unique(Final_Subject_ID)),
+            Size_Match = n_Genotype_Groups == n_Subjects,
+            Init_Solved = n_Genotype_Groups == 1 & n_Subjects == 1,
+            n_Samples_validated = sum(Status == "validated"),
+            n_Samples_corrected = sum(Status == "corrected"),
+            n_Samples_removed = sum(Status == "removed"),
+            n_Samples_ignored = sum(str_detect(Status, "^ignored")),
+            n_Samples_total = n()
+        )
+    
+    dataset_summary <- sample_summary %>%
+        summarize(
+            n_Components = length(unique(Component_ID)),
+            n_Genotype_Groups = length(unique(Genotype_Group_ID)),
+            n_Subjects = length(unique(Final_Subject_ID)),
+            n_Samples_validated = sum(Status == "validated"),
+            n_Samples_corrected = sum(Status == "corrected"),
+            n_Samples_removed= sum(Status == "removed"),
+            n_Samples_total = n()
+        )
+    
+    dir_name <- glue("corrections_output_", str_replace_all(Sys.time(), "[:. ]", "_"))
+    dir.create(dir_name)
+    
+    excel_filename <- file.path(dir_name, "corrections_summary.xlsx")
+    summary_list <- list(
+        "Sample" = sample_summary,
+        "Genotype_Group" = genotype_group_summary,
+        "Component" = component_summary,
+        "Dataset" = dataset_summary)
+    write.xlsx(summary_list, file=excel_filename)
+    
+    for (component in unsolved_components) {
+        save_file <- file.path(dir_name, glue(component, ".png"))
+        png(filename=save_file, width=1600, height=1600)
+        layout_matrix <- matrix(1:4, ncol=2)
+        layout(layout_matrix)
+        generate_graph(orig_sample_genotype_data %>% filter(Init_Component_ID == component), graph_type="combined", plot=TRUE)
+        title(main=glue(component, ": Before corrections"), cex.main=2)
+        generate_corrections_graph(sample_genotype_data %>% filter(Init_Component_ID == component), plot=TRUE)
+        title(main=glue(component, ": Applied corrections"), cex.main=2)
+        generate_graph(sample_genotype_data %>% filter(Init_Component_ID == component), graph_type="combined", plot=TRUE)
+        title(main=glue(component, ": After corrections"), cex.main=2)
+        dev.off()
+    }
+    
+    sample_genotype_data
+}
+
 
 ```
 
@@ -1978,10 +2154,10 @@ elist_params <- my_params[names(my_params) != "handle_mislabels"]
 elist <- do.call(sim_mislabeled_data, elist_params)
 
 elist_params <- list(
-  n_subjects_per_group = 15,
-  n_samples_per_group = 60,
+  n_subjects_per_group = 50,
+  n_samples_per_group = 150,
   n_features = 10,
-  n_mislabels = 20,
+  n_mislabels = 45,
   n_sv = 5,
   fraction_de_case = 0.5,
   case_sd = 0.1,
@@ -1994,12 +2170,33 @@ elist_params <- list(
   seed = 1988)
 elist <- do.call(sim_mislabeled_data, elist_params)
 sample_genotype_data <- elist$targets %>% 
-    select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
-    mutate(
-        Init_Sample_ID = Sample_ID
-    )
+    select(Sample_ID, Subject_ID, Genotype_Group_ID)
+rownames(sample_genotype_data) <- NULL
+
+correct_main(sample_genotype_data)
+
+
+
+
+
+
+
+
+
+
+
 combined_graph <- generate_graph(sample_genotype_data, graph_type="combined")
 sample_genotype_data$Component_ID <- clusters(combined_graph)$membership[sample_genotype_data$Sample_ID]
+
+
+
+
+
+
+
+
+
+
 
 
 
