@@ -74,6 +74,7 @@ plan(callr)
 # Makes EList and MArrayLM objects print nicely, for convenience
 try(source("prettylimma.R"), silent = TRUE)
 
+
 ```
 
 # General helpers
@@ -155,6 +156,9 @@ digits <- function(x, base = 10) {
 
 generate_ids <- function(prefix, n, num_digits=digits(max(n))) {
     if (length(n) == 1) {
+        if (n == 0) {
+            return(NULL)
+        }
         n <- seq_len(n)
     }
     digit_format <- str_c("%0", num_digits, "i")
@@ -212,7 +216,7 @@ show_EList <- function (object) {
 validate_sample_genotype_data <- function(sample_genotype_data, init_required=FALSE) {
     assert_that(
         is.data.frame(sample_genotype_data),
-        msg = "Invalid: 'sample_genotype_data' must be a data frame"
+        msg = "Invalid: 'sample_genotype_data' must be a data.frame object"
     )
     
     required_columns <- c("Sample_ID", "Subject_ID", "Genotype_Group_ID")
@@ -233,7 +237,7 @@ validate_sample_genotype_data <- function(sample_genotype_data, init_required=FA
 validate_putative_subjects <- function(putative_subjects) {
     assert_that(
         is.data.frame(putative_subjects),
-        msg = "Invalid: 'putative_subjects' must be a data frame"
+        msg = "Invalid: 'putative_subjects' must be a data.frame object"
     )
     
     required_columns <- c("Subject_ID", "Genotype_Group_ID")
@@ -260,7 +264,7 @@ validate_relabels <- function(sample_genotype_data, relabels) {
     
     assert_that(
         is.data.frame(relabels),
-        msg = "Invalid: 'relabels' must be a data frame"
+        msg = "Invalid: 'relabels' must be a data.frame object"
     )
     
     required_columns <- c("relabel_from", "relabel_to")
@@ -293,6 +297,41 @@ validate_relabels <- function(sample_genotype_data, relabels) {
     )
 }
 
+validate_swap_cats <- function(swap_cats, sample_genotype_data=NULL) {
+    assert_that(
+        is.data.frame(swap_cats),
+        msg = "Invalid: 'swap_cats' must be a data.frame object"
+    )
+    
+    assert_that(
+        colnames(swap_cats)[1] == "Sample_ID",
+        msg = "Invalid: 'swap_cats' first column must have name Sample_ID"
+    )
+    
+    duplicated_samples <- swap_cats$Sample_ID[duplicated(swap_cats$Sample_ID)]
+    assert_that(
+        length(duplicated_samples) == 0,
+        msg = glue("Invalid: 'swap_cats' has non-unique Sample_ID(s) {paste(duplicated_samples, collapse=\", \")}")
+    )
+    
+    if (ncol(swap_cats) > 1) {
+        swap_cats_factor_filter <- sapply(swap_cats[, 2:ncol(swap_cats)], is.factor)
+        non_factor_cols <- colnames(swap_cats[, 2:ncol(swap_cats)])[!swap_cats_factor_filter]
+        assert_that(
+            all(swap_cats_factor_filter),
+            msg = glue("Invalid: 'swap_cats' columns 2:n must be of type factor, check column(s) {paste(non_factor_cols, collapse=\", \")}")
+        )
+    }
+    
+    if (!is.null(sample_genotype_data)) {
+        missing_samples <- setdiff(sample_genotype_data$Sample_ID, swap_cats$Sample_ID)
+        assert_that(
+            length(missing_samples) == 0,
+            msg = glue("Invalid: 'swap_cats' is missing Sample_ID(s) that exist in 'sample_genotype_data', check Sample_ID(s) {paste(missing_samples, collapse=\", \")}")
+        )
+    }
+}
+
 get_unsolved_components <- function(sample_genotype_data) {
     validate_sample_genotype_data(sample_genotype_data)
     solved_components <- sample_genotype_data %>% 
@@ -310,7 +349,7 @@ plot_graph <- function(graph) {
     edge_colors <- if (!is.null(E(graph)$edge_colors)) E(graph)$edge_colors else "grey"
     vertex_colors <- if (!is.null(V(graph)$vertex_colors)) V(graph)$vertex_colors else "orange"
     layout_custom <- with_seed(layout_nicely(graph), seed=1987)
-    my_plot <- plot(graph, vertex.size=4, vertex.label.cex=2, edge.arrow.size=.8, edge.width=5, 
+    my_plot <- plot(graph, vertex.size=4, vertex.label.cex=0.6, edge.arrow.size=.8, edge.width=5, 
                        edge.color=edge_colors, vertex.color=vertex_colors, vertex.label.color="black", 
                        vertex.frame.color="transparent", layout=layout_custom)
     return(my_plot)
@@ -397,8 +436,31 @@ generate_corrections_graph <- function(sample_genotype_data, plot=FALSE) {
     return(graph)
 }
 
+swap_cats_to_matrix <- function(swap_cats) {
+    validate_swap_cats(swap_cats)
+    n <- nrow(swap_cats)
+    if (ncol(swap_cats) < 2) {
+        swap_cats_matrix <- matrix(TRUE, nrow=n, ncol=n)
+    } else {
+        swap_cats_matrix <- matrix(FALSE, nrow=n, ncol=n)
+        swap_cats_int <- interaction(swap_cats[, 2:ncol(swap_cats)], sep=":")
+        for (level in levels(swap_cats_int)) {
+            idx <- swap_cats_int == level
+            swap_cats_matrix[idx, idx] <- TRUE
+        }
+    }
+    rownames(swap_cats_matrix) <- colnames(swap_cats_matrix) <- swap_cats$Sample_ID
+    return(swap_cats_matrix)
+} 
+
+
+swap_cats_to_graph <- function(swap_cats) {
+    swap_cats_matrix <- swap_cats_to_matrix(swap_cats)
+    return(graph_from_adjacency_matrix(swap_cats_matrix, mode="directed"))
+} 
+
 ## TODO: is there a better R data structure for putative_subjects? In Python I'd use a dict
-generate_relabels_graph_from_putative_subjects <- function(sample_genotype_data, putative_subjects) {
+generate_relabels_graph_from_putative_subjects <- function(sample_genotype_data, putative_subjects, swap_cats_graph) {
     validate_sample_genotype_data(sample_genotype_data)
     validate_putative_subjects(putative_subjects)
     putative_subjects_list <- as.list(setNames(putative_subjects$Subject_ID, putative_subjects$Genotype_Group_ID))
@@ -429,6 +491,7 @@ generate_relabels_graph_from_putative_subjects <- function(sample_genotype_data,
         }
     }
     relabels_graph <- graph_from_adjacency_matrix(relabels_adjacency_mat, mode="directed")
+    relabels_graph <- graph.intersection(relabels_graph, swap_cats_graph)
     
     ## Filter out samples that have no edges
     relabels_graph <- subgraph(relabels_graph, V(relabels_graph)[degree(relabels_graph, mode="all") > 0])
@@ -620,52 +683,64 @@ min_swaps_comprehensive_search <- function(connected_component) {
     
     ## For now, just take top row
     ## TODO: if there is a tie, return some indication...maybe a list of everything part of the tie
-    connected_component %<>%
-        mutate(
-            Assumed_Subject_ID = sapply(Genotype_Group_ID, \(x) perm_genotypes[1, x]),
-            Assumed_Mislabeled = Subject_ID != Assumed_Subject_ID
-        )
-    assumed_mislabels <- connected_component[connected_component$Assumed_Mislabeled, "Sample_ID"]
-    relabels_adj_matrix <- matrix(FALSE, nrow=length(assumed_mislabels), length(assumed_mislabels),
-                                  dimnames=list(assumed_mislabels, assumed_mislabels))
-    for (sample_id in assumed_mislabels) {
-        assumed_subject_id <- connected_component[connected_component["Sample_ID"] == sample_id, ]$Assumed_Subject_ID[[1]]
-        possible_relabels <- connected_component %>% 
-            filter(
-                Sample_ID %in% assumed_mislabels,
-                Subject_ID == assumed_subject_id
-            ) %>% 
-            pull(Sample_ID)
-        relabels_adj_matrix[sample_id, possible_relabels] = TRUE
-    }
-    relabels_graph <- graph_from_adjacency_matrix(relabels_adj_matrix, mode="directed")
+    putative_subjects <- perm_genotypes[1, ] %>% 
+        select(-n_min_mislabels, -n_implied_mislabels) %>% 
+        t() %>% 
+        as.data.frame() %>% 
+        rownames_to_column()
+    colnames(putative_subjects) <- c("Genotype_Group_ID", "Subject_ID")
     
-    all_relabeled_samples <- NULL
-    all_cycles <- list()
-    cutoff <- 1
-    while (vcount(relabels_graph) > 0) {
-        curr_cycles <- find_directed_cycles(relabels_graph, cutoff=cutoff)
-        for (curr_cycle in curr_cycles) {
-            if (!any(curr_cycle %in% all_relabeled_samples)) {
-                all_cycles <- append(all_cycles, list(curr_cycle))
-                all_relabeled_samples <- c(all_relabeled_samples, curr_cycle)
-                relabels_graph <- delete_vertices(relabels_graph, curr_cycle)
-            }
-        }
-        cutoff <- cutoff + 1
-    }
-    
-    relabels <- data.frame(relabel_from=character(0), relabel_to=character(0))
-    for (curr_cycle in all_cycles) {
-        n <- length(curr_cycle)
-        curr_relabels <- data.frame(
-            relabel_from = curr_cycle,
-            relabel_to = c(curr_cycle[2:n], curr_cycle[1])
-        )
-        relabels <- rbind(relabels, curr_relabels)
-    }
-    
+    relabels_graph <- generate_relabels_graph_from_putative_subjects(connected_component, putative_subjects, swap_cats_graph)
+    relabels <- relabel_cycles(relabels_graph)
     return(relabels)
+    
+    ## Old stuff that is to be replaced by the relabels_graph/detect_cycles framework
+    # connected_component %<>%
+    #     mutate(
+    #         Assumed_Subject_ID = sapply(Genotype_Group_ID, \(x) perm_genotypes[1, x]),
+    #         Assumed_Mislabeled = Subject_ID != Assumed_Subject_ID
+    #     )
+    # assumed_mislabels <- connected_component[connected_component$Assumed_Mislabeled, "Sample_ID"]
+    # relabels_adj_matrix <- matrix(FALSE, nrow=length(assumed_mislabels), length(assumed_mislabels),
+    #                               dimnames=list(assumed_mislabels, assumed_mislabels))
+    # for (sample_id in assumed_mislabels) {
+    #     assumed_subject_id <- connected_component[connected_component["Sample_ID"] == sample_id, ]$Assumed_Subject_ID[[1]]
+    #     possible_relabels <- connected_component %>% 
+    #         filter(
+    #             Sample_ID %in% assumed_mislabels,
+    #             Subject_ID == assumed_subject_id
+    #         ) %>% 
+    #         pull(Sample_ID)
+    #     relabels_adj_matrix[sample_id, possible_relabels] = TRUE
+    # }
+    # relabels_graph <- graph_from_adjacency_matrix(relabels_adj_matrix, mode="directed")
+    # 
+    # all_relabeled_samples <- NULL
+    # all_cycles <- list()
+    # cutoff <- 1
+    # while (vcount(relabels_graph) > 0) {
+    #     curr_cycles <- find_directed_cycles(relabels_graph, cutoff=cutoff)
+    #     for (curr_cycle in curr_cycles) {
+    #         if (!any(curr_cycle %in% all_relabeled_samples)) {
+    #             all_cycles <- append(all_cycles, list(curr_cycle))
+    #             all_relabeled_samples <- c(all_relabeled_samples, curr_cycle)
+    #             relabels_graph <- delete_vertices(relabels_graph, curr_cycle)
+    #         }
+    #     }
+    #     cutoff <- cutoff + 1
+    # }
+    # 
+    # relabels <- data.frame(relabel_from=character(0), relabel_to=character(0))
+    # for (curr_cycle in all_cycles) {
+    #     n <- length(curr_cycle)
+    #     curr_relabels <- data.frame(
+    #         relabel_from = curr_cycle,
+    #         relabel_to = c(curr_cycle[2:n], curr_cycle[1])
+    #     )
+    #     relabels <- rbind(relabels, curr_relabels)
+    # }
+    # 
+    # return(relabels)
 }
 
 ```
@@ -696,7 +771,7 @@ objective_hamming_distance <- function(sample_genotype_data) {
 ## If filter_concordant_vertices is true, filter out any vertices that have green edges 
 ## This should speed up the search, but misses cases where 2 samples from the same genotype
 ## are mislabeled into the same incorrect genotype
-local_search_correct <- function(sample_genotype_data, objective, n_iter=1, filter_concordant_vertices=TRUE) {
+local_search_correct <- function(sample_genotype_data, objective, swap_cats_graph, n_iter=1, filter_concordant_vertices=TRUE) {
     search_objectives <- list(
         genotype_entropy = objective_genotype_entropy,
         hamming_distance = objective_hamming_distance
@@ -712,7 +787,7 @@ local_search_correct <- function(sample_genotype_data, objective, n_iter=1, filt
 
     ## For any objective, the only improving swaps involve 2 samples connected
     ## to a common sample but not each other. One has a genotype edge and one a label edge
-    find_neighbors <- function(combined_graph) {
+    find_neighbors <- function(combined_graph, swap_cats_graph) {
         v_filtered <- V(combined_graph)
         if (filter_concordant_vertices) {
             v_filtered <- NULL
@@ -735,6 +810,9 @@ local_search_correct <- function(sample_genotype_data, objective, n_iter=1, filt
                 Sample_A = pmin(Row, Col),
                 Sample_B = pmax(Row, Col)
             ) %>% unique()
+        swap_cats_edges <- get.data.frame(swap_cats_graph) %>% 
+            rename(Sample_A="from", Sample_B="to")
+        filtered_unique_pairs <- inner_join(unique_pairs, swap_cats_edges, by=c("Sample_A", "Sample_B"))
         return(unique_pairs)
     }
     
@@ -746,7 +824,7 @@ local_search_correct <- function(sample_genotype_data, objective, n_iter=1, filt
 
     for (curr_iter in 1:n_iter) {
         combined_graph <- generate_graph(sample_genotype_data, "combined")
-        neighbors <- find_neighbors(combined_graph) %>% 
+        neighbors <- find_neighbors(combined_graph, swap_cats_graph) %>% 
             left_join(sample_genotype_data[, c("Sample_ID", "Component_ID")], by=c("Sample_A"="Sample_ID"))
         if (nrow(neighbors) == 0) { break }
         neighbor_objectives <- neighbors %>% 
@@ -778,15 +856,15 @@ local_search_correct <- function(sample_genotype_data, objective, n_iter=1, filt
 
 ```{r}
 
-correct_majority_cycles <- function(sample_genotype_data) {
+correct_majority_cycles <- function(sample_genotype_data, swap_cats_graph) {
     putative_subjects <- get_majority_majority_pairs(sample_genotype_data)
-    relabels_graph <- generate_relabels_graph_from_putative_subjects(sample_genotype_data, putative_subjects)
+    relabels_graph <- generate_relabels_graph_from_putative_subjects(sample_genotype_data, putative_subjects, swap_cats_graph)
     majority_cycle_relabels <- relabel_cycles(relabels_graph)
     sample_genotype_data <- relabel_sample_genotype_data(sample_genotype_data, majority_cycle_relabels)
     return(sample_genotype_data)
 }
 
-correct_comprehensive_search <- function(sample_genotype_data, max_subjects=9) {
+correct_comprehensive_search <- function(sample_genotype_data, swap_cats_graph, max_subjects=9) {
     relabels <- data.frame(relabel_from=character(0), relabel_to=character(0))
     components <- unique(sample_genotype_data$Component_ID)
     for (component_id in components) {
@@ -809,8 +887,14 @@ correct_local_search_entropy <- function(sample_genotype_data, ...) {
     return(local_search_correct(sample_genotype_data, "genotype_entropy", ...))
 }
 
-correct_main <- function(sample_genotype_data) {
+correct_main <- function(sample_genotype_data, swap_cats=NULL) {
     validate_sample_genotype_data(sample_genotype_data)
+    if (!is.null(swap_cats)) {
+        validate_swap_cats(swap_cats, sample_genotype_data)
+    } else {
+        swap_cats <- sample_genotype_data %>% select(Sample_ID)
+    }
+    swap_cats_graph <- swap_cats_to_graph(swap_cats)
     
     ## Assign a Component_ID for each connected component in the graph
     combined_graph <- generate_graph(sample_genotype_data, graph_type="combined")
@@ -820,7 +904,7 @@ correct_main <- function(sample_genotype_data) {
     ordered_components <- rep(NA_integer_, length(components))
     for (i in seq_along(sorted_components)) {
         formatted_component <- sprintf("%0*d", digits(length(component_sizes)), i)
-        ordered_components[components == sorted_components[i]] <- glue("Component_", formatted_component)
+        ordered_components[components == sorted_components[i]] <- glue("Component", formatted_component)
     }
     sample_genotype_data %<>% mutate(
         Component_ID = ordered_components,
@@ -832,13 +916,13 @@ correct_main <- function(sample_genotype_data) {
     unsolved_components <- sort(get_unsolved_components(orig_sample_genotype_data))
     
     while (TRUE) {
-        sample_genotype_data <- correct_comprehensive_search(sample_genotype_data)
+        sample_genotype_data <- correct_comprehensive_search(sample_genotype_data, swap_cats_graph)
         if (objective_hamming_distance(sample_genotype_data) == 0) break
-        sample_genotype_data <- correct_majority_cycles(sample_genotype_data)
+        sample_genotype_data <- correct_majority_cycles(sample_genotype_data, swap_cats_graph)
         if (objective_hamming_distance(sample_genotype_data) == 0) break
-        sample_genotype_data <- correct_majority_cycles(sample_genotype_data)
+        sample_genotype_data <- correct_comprehensive_search(sample_genotype_data, swap_cats_graph)
         if (objective_hamming_distance(sample_genotype_data) == 0) break
-        sample_genotype_data <- correct_local_search_entropy(sample_genotype_data, n_iter=1)
+        sample_genotype_data <- correct_local_search_entropy(sample_genotype_data, swap_cats_graph, n_iter=1)
         if (objective_hamming_distance(sample_genotype_data) == 0) break
     }
     
@@ -975,7 +1059,6 @@ correct_main <- function(sample_genotype_data) {
     
     sample_genotype_data
 }
-
 
 ```
 
@@ -1179,7 +1262,18 @@ handle_mislabels_correct_oracle <- function(elist) {
 
 ```{r}
 
+## TODO: implement swap_cats
 genswaps_random = function(elist, n_mislabels) {
+    correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
+    n_swaps <- floor(n_mislabels / 2)
+    swaps <- cbind(
+        swaps <- matrix(sample(correct_samples, n_swaps * 2), ncol = 2)
+    )
+    return(swap_elist_samples(elist, swaps))
+}
+
+## TODO: implement swap_cats
+genswaps_systematic = function(elist, n_mislabels) {
     correct_ctrl_samples <- elist$targets %>% filter(Status == "Control" & !Mislabeled) %>% pull(Sample_ID)
     correct_case_samples <- elist$targets %>% filter(Status == "Case" & !Mislabeled) %>% pull(Sample_ID)
     n_swaps <- floor(n_mislabels / 2)
@@ -1190,48 +1284,55 @@ genswaps_random = function(elist, n_mislabels) {
     return(swap_elist_samples(elist, swaps))
 }
 
-genswaps_random_with_replacement = function(elist, n_mislabels) {
+genswaps_random_with_replacement = function(elist, n_mislabels, swap_cats) {
+    ## Figure out the maximum number of new mislabels you can make
+    ## Samples that are singletons in their connected component cannot be mislabeled
+    swap_cats_graph <- swap_cats_to_graph(swap_cats)
+    components <- clusters(swap_cats_graph)
+    single_vertex_components <- which(components$csize == 1)
+    single_vertices <- NULL
+    for (component_index in single_vertex_components) {
+        single_vertices <- c(single_vertices, names(which(components$membership == component_index)))
+    }
     n_correct_labels <- nrow(elist$targets %>% filter(!Mislabeled))
+    n_max_new_mislabels <- n_correct_labels - length(single_vertices)
     assert_that(n_mislabels <= n_correct_labels, 
-                msg = glue("Can't generate {n_mislabels} new mislabels when there are only {n_correct_samples} correctly labeled samples"))
+                msg = glue("Can't generate {n_mislabels} new mislabels, max that can be generated is {n_max_new_mislabels}"))
     n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
     n_goal_mislabels <- n_curr_mislabels + n_mislabels
     n_rounds <- 0
     while (n_curr_mislabels < n_goal_mislabels) {
         n_new_mislabels <- n_goal_mislabels - n_curr_mislabels
-        mislabeled_samples <- elist$targets %>% filter(Mislabeled) %>% pull(Sample_ID)
-        correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
-        all_samples <- c(mislabeled_samples, correct_samples)
-        if (n_new_mislabels == 1) {
-            swaps <- cbind(
-                sample(mislabeled_samples, 1),
-                sample(correct_samples, 1)
+        edges <- get.data.frame(swap_cats_graph) %>% 
+            left_join(elist$targets[, c("Sample_ID", "Mislabeled")], by=c("from"="Sample_ID")) %>% 
+            left_join(elist$targets[, c("Sample_ID", "Mislabeled")], by=c("to"="Sample_ID")) %>% 
+            mutate(
+                n_mislabels = Mislabeled.x + Mislabeled.y
             )
+        both_correct <- edges %>% filter(n_mislabels == 0) %>% select(from, to)
+        one_correct <- edges %>% filter(n_mislabels == 1) %>% select(from, to)
+        all_edges <- edges %>% select(from, to)
+        if (n_rounds > 8) {
+            break
+        } else if (n_new_mislabels == 1) {
+            if (nrow(one_correct) < 1) break
+            swaps <- one_correct[sample(nrow(one_correct), 1), ]
         } else if (n_new_mislabels == 2) {
-            swaps <- matrix(sample(correct_samples, 2), ncol = 2)
+            if (nrow(both_correct) == 0) {
+                if (nrow(one_correct) < 2) break
+                swaps <- one_correct[sample(nrow(one_correct), 2), ]
+            }
+            swaps <- both_correct[sample(nrow(both_correct), 1), ]
         } else if (n_rounds > 5) {
-            swaps <- cbind(
-                sample(mislabeled_samples, n_new_mislabels),
-                sample(correct_samples, n_new_mislabels)
-            )
+            swaps <- both_correct[sample(nrow(both_correct), floor(n_new_mislabels/2), replace=TRUE), ]
         } else {
-            n_swaps <- floor(n_new_mislabels / 2)
-            swaps <- matrix(sample(all_samples, 2 * n_swaps, replace = TRUE), ncol = 2)
+            swaps <- all_edges[sample(nrow(all_edges), floor(n_new_mislabels/2), replace=TRUE), ]
         }
         elist <- swap_elist_samples(elist, swaps)
         n_rounds <- n_rounds + 1
-        n_curr_mislabels <- nrow(elist$targets %>% filter(Mislabeled))
+        n_curr_mislabels <- sum(elist$targets$Mislabeled)
     }
     return(elist)
-}
-
-genswaps_systematic = function(elist, n_mislabels) {
-    correct_samples <- elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID)
-    n_swaps <- floor(n_mislabels / 2)
-    swaps <- cbind(
-        swaps <- matrix(sample(correct_samples, n_swaps * 2), ncol = 2)
-    )
-    return(swap_elist_samples(elist, swaps))
 }
 
 swap_handlers <- list(
@@ -1251,6 +1352,7 @@ handle_swaps_options <- names(swap_handlers)
 local({
     n_subjects_per_group = 30
     n_samples_per_group = 150
+    n_swap_cats = 2
     n_features = 2
     n_mislabels = 100
     n_sv = 2
@@ -1268,6 +1370,7 @@ local({
 sim_mislabeled_data <- function (
     n_subjects_per_group,
     n_samples_per_group,
+    n_swap_cats,
     n_features,
     n_mislabels,
     n_sv,
@@ -1285,6 +1388,7 @@ sim_mislabeled_data <- function (
         sim_params <- mget(c(
             "n_subjects_per_group",
             "n_samples_per_group",
+            "n_swap_cats",
             "n_features",
             "n_mislabels",
             "n_sv",
@@ -1320,6 +1424,7 @@ sim_mislabeled_data <- function (
     assert_that(
         n_subjects_per_group > 1,
         n_samples_per_group >= n_subjects_per_group,
+        n_swap_cats >= 0,
         n_features > 0,
         n_mislabels >= 0 & n_mislabels != 1,
         n_mislabels <= n_samples,
@@ -1368,13 +1473,13 @@ sim_mislabeled_data <- function (
         ) %>% select(-addl_samples)
 
     ## Generate the samples
-    num_digits <- digits(max(subject_meta_table$n_samples))
+    genotype_digit_format <- str_c("%0", digits(2*n_subjects_per_group), "i")
     sample_meta_table <- tibble(
         Subject_ID = rep.int(subject_meta_table$Subject_ID, times=subject_meta_table$n_samples)
     ) %>% 
         group_by( Subject_ID ) %>% 
         mutate(
-            Sample_ID = generate_ids(str_c(Subject_ID, "_Sample"), n(), num_digits=num_digits)
+            Sample_ID = generate_ids(str_c(Subject_ID, "_Sample"), n(), num_digits=digits(max(subject_meta_table$n_samples)))
         ) %>% 
         ungroup() %>% 
         left_join(
@@ -1383,7 +1488,7 @@ sim_mislabeled_data <- function (
         mutate(
             E_Sample_ID = Sample_ID,
             E_Subject_ID = Subject_ID,
-            Genotype_Group_ID = str_c("Genotype_Group", as.character(as.numeric(factor(E_Subject_ID)))),
+            Genotype_Group_ID = str_c("Genotype_Group", sprintf(genotype_digit_format, (as.numeric(factor(E_Subject_ID))))),
             Mislabeled = FALSE,
             Mislabeled_Subject = FALSE
         ) %>% 
@@ -1391,6 +1496,15 @@ sim_mislabeled_data <- function (
         relocate(Sample_ID)
     
     assert_that(length(unique(sample_meta_table$Sex)) > 1, msg = "Only one sex simulated")
+    
+    swap_cats = data.frame(Sample_ID=sample_meta_table$Sample_ID)
+    if (n_swap_cats > 0) {
+        swap_cat_names <- generate_ids("SwapCat", n_swap_cats)
+        for (sci in swap_cat_names) {
+            groups <- paste0(sci, "_Group", c(1,2))
+            swap_cats[[sci]] <- as.factor(sample(groups, nrow(sample_meta_table), replace=TRUE))
+        }
+    }
     
     sv_names <- generate_ids("SV", n_sv)
     for (svi in sv_names) {
@@ -1450,6 +1564,7 @@ sim_mislabeled_data <- function (
         E = expr_mat,
         genes = as.data.frame(feature_meta_table),
         targets = as.data.frame(sample_meta_table),
+        swap_cats = as.data.frame(swap_cats),
         other = list(
             eta_sv = t(eta_sv),
             eta_case = t(eta_case),
@@ -1460,6 +1575,7 @@ sim_mislabeled_data <- function (
         params = mget(c(
             "n_subjects_per_group",
             "n_samples_per_group",
+            "n_swap_cats",
             "n_features",
             "n_mislabels",
             "n_sv",
@@ -1499,7 +1615,7 @@ sim_mislabeled_data <- function (
     
     ## Create mislabeled samples
     tsmsg(glue("Swapping samples with method: {swap_model}"))
-    elist <- handle_swaps_function(elist, n_mislabels)
+    elist <- handle_swaps_function(elist, n_mislabels, swap_cats)
 
     ## Store original targets so we can access initial Sample_ID/E_Data 
     ## pairs to assess the results of the label correction algorithm
@@ -2156,6 +2272,7 @@ elist <- do.call(sim_mislabeled_data, elist_params)
 elist_params <- list(
   n_subjects_per_group = 50,
   n_samples_per_group = 150,
+  n_swap_cats = 3,
   n_features = 10,
   n_mislabels = 45,
   n_sv = 5,
@@ -2169,15 +2286,21 @@ elist_params <- list(
   swap_model = "random_with_replacement",
   seed = 1988)
 elist <- do.call(sim_mislabeled_data, elist_params)
-sample_genotype_data <- elist$targets %>% 
+sample_genotype_data <- elist$targets %>%
     select(Sample_ID, Subject_ID, Genotype_Group_ID)
 rownames(sample_genotype_data) <- NULL
+swap_cats <- elist$swap_cats
 
-correct_main(sample_genotype_data)
+correct_main(sample_genotype_data, swap_cats)
 
 
 
-
+# sample_genotype_data <- elist$targets %>% 
+#     select(Sample_ID, Subject_ID, Genotype_Group_ID, E_Sample_ID) %>% 
+#     mutate(
+#         Init_Sample_ID = Sample_ID,
+#         Sample_ID = E_Sample_ID
+#     )
 
 
 
