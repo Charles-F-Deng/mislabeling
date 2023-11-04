@@ -557,6 +557,7 @@ setMethod("write_corrections", "MislabelSolver",
 }
 
 .update_putative_subjects <- function(object, proposed_putative_subjects) {
+    if (nrow(proposed_putative_subjects)) return(object)
     ## Only add Genotype_Group_ID/Subject_ID combinations if neither the 
     ## Genotype_Group_ID nor the Subject_ID are already in putative_subjects
     existing_genotypes <- object@.solve_state$putative_subjects$Genotype_Group_ID
@@ -599,8 +600,12 @@ setMethod("write_corrections", "MislabelSolver",
     return(object)
 }
 
-.find_relabel_cycles_from_putative_subjects <- function(object) {
-    putative_subjects <- object@.solve_state$putative_subjects
+.find_relabel_cycles_from_putative_subjects <- function(object, putative_subjects=NULL) {
+    if (is.null(putative_subjects)) {
+        putative_subjects <- object@.solve_state$putative_subjects
+    } else {
+        .validate_putative_subjects(object@sample_genotype_data, putative_subjects)
+    }
     unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data
     
     putative_subjects_list <- as.list(setNames(putative_subjects$Subject_ID, putative_subjects$Genotype_Group_ID))
@@ -898,6 +903,8 @@ setMethod("write_corrections", "MislabelSolver",
         msg = glue("'anchor_samples' contains Sample_ID(s) with the same Subject_ID
                    but in different Genotype_Group_ID(s), check {paste(genotype_inconsistent_samples, collapse=\", \")}")
     )
+    
+    ## TODO: compare this with putative subjects
 }
 
 ################################################################################
