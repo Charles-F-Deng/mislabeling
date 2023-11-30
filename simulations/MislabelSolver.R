@@ -135,7 +135,9 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
               }
               
               ## 1. Update putative subjects
+              MAX_GENOTYPES <- 9
               component_ids <- unique(object@.solve_state$unsolved_relabel_data$Component_ID)
+              possible_neighbors <- .find_neighbors(object)
               for (component_id in component_ids) {
                   connected_component <- object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == component_id)
                   
@@ -146,9 +148,37 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   
                   locked_genotypes <- object@.solve_state$putative_subjects %>% 
                       filter(Genotype_Group_ID %in% unique(connected_component$Genotype_Group_ID))
+                  ## Hotfix for the case that I showed Ryan, 4 samples and 2 groups but it's actually unambiguous
+                  ## If it's a plurality within it's own genotype group, and it can't be swapped, lock it
+                  votes <- .genotype_group_vote(object)
+                  for (genotype_group in rownames(votes)) {
+                      if (genotype_group %in% locked_genotypes$Genotype_Group_ID) {next}
+                      max_votes <- max(votes[genotype_group, ])
+                      plurality_subjects <- colnames(votes)[votes[genotype_group, ] == max_votes]
+                      genotype_locked <- FALSE
+                      for (subject_id in plurality_subjects) {
+                          sample_ids <- connected_component %>%
+                              filter(Subject_ID == subject_id,
+                                     Genotype_Group_ID == genotype_group) %>%
+                              pull(Sample_ID)
+                          # If any of the sample ids can't be swapped, lock this genotype/subject
+                          for (sample_id in sample_ids) {
+                              if (!(sample_id %in% possible_neighbors)) {
+                                  locked_genotypes %<>%
+                                      rbind(data.frame(
+                                          Genotype_Group_ID = genotype_group,
+                                          Subject_ID = subject_id))
+                                  genotype_locked <- TRUE
+                                  break
+                              }
+                          }
+                          if (genotype_locked) {break}
+                      }
+                  }
+
                   free_genotypes <- setdiff(connected_component$Genotype_Group_ID, locked_genotypes$Genotype_Group_ID)
                   free_subjects <- setdiff(connected_component$Subject_ID, locked_genotypes$Subject_ID)
-                  if (length(free_genotypes) > 9) {
+                  if (length(free_genotypes) > MAX_GENOTYPES) {
                       next
                   }
                   if (length(free_genotypes) > 0) {
@@ -300,19 +330,24 @@ setMethod("solve_local_search", "MislabelSolver",
 )
 
 setMethod("solve", "MislabelSolver",
-          function(object, write_corrections=FALSE) {
+          function(object) {
               while (TRUE) {
                   if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                       break
                   }
+                  prev_solve_state <- object@.solve_state$unsolved_relabel_data
+                  
                   object <- solve_comprehensive_search(object)
                   object <- solve_majority_search(object)
                   object <- solve_comprehensive_search(object)
                   object <- solve_local_search(object, n_iter=1)
-              }
-              
-              if (write_corrections) {
-                  write_corrections(object)
+                  
+                  ## If current solve state is the same as previous, break
+                  if (nrow(prev_solve_state) == nrow(object@.solve_state$unsolved_relabel_data)) {
+                      if (all.equal(prev_solve_state, object@.solve_state$unsolved_relabel_data)) {
+                          break
+                      }
+                  }
               }
               
               return(object)
@@ -400,7 +435,7 @@ setMethod("write_corrections", "MislabelSolver",
                   ungroup() %>% 
                   select(Genotype_Group_ID, Inferred_Subject_ID, Init_Fraction_Match, everything())
               
-              compoånent_summary <- sample_summary %>% 
+              component_summary <- sample_summary %>% 
                   group_by(Component_ID) %>% 
                   summarize(
                       n_Genotype_Groups = length(unique(Genotype_Group_ID)),
@@ -453,11 +488,11 @@ setMethod("write_corrections", "MislabelSolver",
                   layout(layout_matrix)
                   .plot_graph(.generate_graph(object@.solve_state$relabel_data %>% 
                                                   filter(Init_Component_ID == component) %>% 
-                                                  mutate(Sample_ID = Init_Sample_ID, Subject_ID = Init_Subject_ID), graph_type="combined"))
+                                                  mutate(Sample_ID = Init_Sample_ID, Subject_ID = Init_Subject_ID), graph_type="combined"), to_write=TRUE)
                   title(main=glue(component, ": Before corrections"), cex.main=2)
-                  .plot_graph(.generate_corrections_graph(object@.solve_state$relabel_data %>% filter(Init_Component_ID == component)))
+                  .plot_graph(.generate_corrections_graph(object@.solve_state$relabel_data %>% filter(Init_Component_ID == component)), to_write=TRUE)
                   title(main=glue(component, ": Applied corrections"), cex.main=2)
-                  .plot_graph(.generate_graph(object@.solve_state$relabel_data %>% filter(Init_Component_ID == component), graph_type="combined"))
+                  .plot_graph(.generate_graph(object@.solve_state$relabel_data %>% filter(Init_Component_ID == component), graph_type="combined"), to_write=TRUE)
                   title(main=glue(component, ": After corrections"), cex.main=2)
                   dev.off()
               }
@@ -557,7 +592,7 @@ setMethod("write_corrections", "MislabelSolver",
 }
 
 .update_putative_subjects <- function(object, proposed_putative_subjects) {
-    if (nrow(proposed_putative_subjects)) return(object)
+    if (nrow(proposed_putative_subjects) == 0) return(object)
     ## Only add Genotype_Group_ID/Subject_ID combinations if neither the 
     ## Genotype_Group_ID nor the Subject_ID are already in putative_subjects
     existing_genotypes <- object@.solve_state$putative_subjects$Genotype_Group_ID
@@ -911,12 +946,22 @@ setMethod("write_corrections", "MislabelSolver",
 ##################               GRAPH HELPERS                ##################
 ################################################################################
 
-.plot_graph <- function(graph) {
+.plot_graph <- function(graph, to_write=FALSE) {
     edge_colors <- if (!is.null(E(graph)$edge_colors)) E(graph)$edge_colors else "grey"
     vertex_colors <- if (!is.null(V(graph)$vertex_colors)) V(graph)$vertex_colors else "orange"
     layout_custom <- with_seed(layout_nicely(graph), seed=1987)
-    my_plot <- plot(graph, vertex.size=2, vertex.label.cex=0.6, edge.arrow.size=.8, edge.width=3, 
-                    edge.color=edge_colors, vertex.color=vertex_colors, vertex.label.color="black", 
+    vertex.label.cex <- 0.6
+    vertex.size <- 5
+    edge.arrow.size <- 0.8
+    edge.width <- 3
+    if (to_write) {
+        vertex.label.cex <- 2
+        vertex.size <- 2
+        edge.arrow.size <- 2
+        edge.width <- 8
+    }
+    my_plot <- plot(graph, vertex.size=vertex.size, vertex.label.cex=vertex.label.cex, edge.arrow.size=edge.arrow.size, 
+                    edge.width=edge.width, edge.color=edge_colors, vertex.color=vertex_colors, vertex.label.color="black", 
                     vertex.frame.color="transparent", layout=layout_custom)
     return(my_plot)
 }
@@ -1049,9 +1094,25 @@ setMethod("write_corrections", "MislabelSolver",
 ##################                  TESTING                   ##################
 ################################################################################
 
-my_mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats)
+load_test_case <- function(test_name) {
+    setwd("/Users/charlesdeng/Workspace/mislabeling")
+    sample_genotype_data <- read.xlsx("simulations/tests/sample_genotype_data_tests.xlsx", sheet=test_name)
+    swap_cats <- NULL
+    tryCatch({
+        swap_cats <- read.xlsx("simulations/tests/swap_cats_tests.xlsx", sheet=test_name)
+        for (i in 2:ncol(swap_cats)) {
+            swap_cats[[i]] <- as.factor(swap_cats[[i]])
+        }
+    })
+    my_mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats)
+    return(my_mislabel_solver)
+}
+
+# my_mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats)
+my_mislabel_solver <- load_test_case("1-2C-D")
 my_mislabel_solver <- solve(my_mislabel_solver)
 plot(my_mislabel_solver, filter_solved=FALSE)
+# plot(my_mislabel_solver, )
 my_mislabel_solver <- solve_comprehensive_search(my_mislabel_solver)
 plot(my_mislabel_solver, filter_solved=FALSE)
 my_mislabel_solver <- solve_majority_search(my_mislabel_solver)

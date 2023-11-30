@@ -26,6 +26,7 @@ library(rlang)
 is_named <- rlang::is_named
 library(withr)
 library(methods)
+library(igraph)
 library(fs)
 library(qs)
 library(dplyr)
@@ -2267,7 +2268,14 @@ sample_genotype_data <- elist$targets %>%
 rownames(sample_genotype_data) <- NULL
 swap_cats <- elist$swap_cats
 
-correct_main(sample_genotype_data, swap_cats)
+merged_df <- left_join(elist$targets[, c("Sample_ID", "E_Sample_ID")], 
+          my_mislabel_solver@.solve_state$relabel_data[, c("Init_Sample_ID", "Sample_ID")], 
+          by=c("Sample_ID"="Init_Sample_ID")) %>% 
+    mutate(
+        Init_Mislabeled = Sample_ID != E_Sample_ID,
+        Final_Mislabeled = Sample_ID.y != E_Sample_ID
+    )
+
 
 
 

@@ -4,3 +4,7 @@
 .DS_Store
 docs/
 data/
+CrossCheck/
+scripts/
+mislabels_lit_review/
+simulations/.Rhistory
