@@ -148,6 +148,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   
                   locked_genotypes <- object@.solve_state$putative_subjects %>% 
                       filter(Genotype_Group_ID %in% unique(connected_component$Genotype_Group_ID))
+                  
                   ## Hotfix for the case that I showed Ryan, 4 samples and 2 groups but it's actually unambiguous
                   ## If it's a plurality within it's own genotype group, and it can't be swapped, lock it
                   votes <- .genotype_group_vote(object)
@@ -163,7 +164,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                               pull(Sample_ID)
                           # If any of the sample ids can't be swapped, lock this genotype/subject
                           for (sample_id in sample_ids) {
-                              if (!(sample_id %in% possible_neighbors)) {
+                              if (!(sample_id %in% possible_neighbors$Sample_A | sample_id %in% possible_neighbors$Sample_B)) {
                                   locked_genotypes %<>%
                                       rbind(data.frame(
                                           Genotype_Group_ID = genotype_group,
@@ -195,18 +196,18 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   perm_genotypes <- as.matrix(perm_genotypes)
                   
                   ## Only including cases where the number of samples in Genotype_Group_ID and Subject_ID align
-                  genotype_counts <- connected_component %>% 
-                      count(Genotype_Group_ID) %>% 
-                      column_to_rownames(var = "Genotype_Group_ID")
-                  genotype_counts <- genotype_counts[colnames(perm_genotypes), ]
-                  subject_counts <- connected_component %>% 
-                      count(Subject_ID) %>% 
-                      column_to_rownames(var = "Subject_ID")
-                  count_concordance <- sapply(1:nrow(perm_genotypes), \(x) all(subject_counts[perm_genotypes[x, ], ] == genotype_counts))
-                  perm_genotypes <- perm_genotypes[count_concordance, , drop=FALSE]
-                  if (nrow(perm_genotypes) == 0) {
-                      next
-                  }
+                  # genotype_counts <- connected_component %>%
+                  #     count(Genotype_Group_ID) %>%
+                  #     column_to_rownames(var = "Genotype_Group_ID")
+                  # genotype_counts <- genotype_counts[colnames(perm_genotypes), ]
+                  # subject_counts <- connected_component %>%
+                  #     count(Subject_ID) %>%
+                  #     column_to_rownames(var = "Subject_ID")
+                  # count_concordance <- sapply(1:nrow(perm_genotypes), \(x) all(subject_counts[perm_genotypes[x, ], ] == genotype_counts))
+                  # perm_genotypes <- perm_genotypes[count_concordance, , drop=FALSE]
+                  # if (nrow(perm_genotypes) == 0) {
+                  #     next
+                  # }
                   
                   ## For each Genotype_Group_ID/Subject_ID permutation, determine the implied Sample_ID/Subject_ID permutation
                   perm_samples <- matrix(nrow=nrow(perm_genotypes), ncol=nrow(connected_component), dimnames=list(NULL, connected_component$Sample_ID))
@@ -255,13 +256,13 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   new_putative_subjects %<>% 
                       anti_join(object@.solve_state$putative_subjects, by=c("Genotype_Group_ID", "Subject_ID"))
                   object <- .update_putative_subjects(object, new_putative_subjects)
+                  
+                  ## Find relabel cycles
+                  relabels <- .find_relabel_cycles_from_putative_subjects(object)
+                  
+                  ## Relabel samples and update solve state
+                  object <- .relabel_samples(object, relabels) 
               }
-              
-              ## 2. Find relabel cycles
-              relabels <- .find_relabel_cycles_from_putative_subjects(object)
-              
-              ## 3. Relabel samples and update solve state
-              object <- .relabel_samples(object, relabels)
               
               return(object)
           }
@@ -1098,19 +1099,20 @@ load_test_case <- function(test_name) {
     setwd("/Users/charlesdeng/Workspace/mislabeling")
     sample_genotype_data <- read.xlsx("simulations/tests/sample_genotype_data_tests.xlsx", sheet=test_name)
     swap_cats <- NULL
-    tryCatch({
+    try({
         swap_cats <- read.xlsx("simulations/tests/swap_cats_tests.xlsx", sheet=test_name)
         for (i in 2:ncol(swap_cats)) {
             swap_cats[[i]] <- as.factor(swap_cats[[i]])
         }
-    })
+    }, silent=TRUE)
     my_mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats)
     return(my_mislabel_solver)
 }
 
 # my_mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats)
-my_mislabel_solver <- load_test_case("1-2C-D")
-my_mislabel_solver <- solve(my_mislabel_solver)
+my_mislabel_solver1 <- load_test_case("1-4C-1-2C-D")
+my_mislabel_solver2 <- load_test_case("1-4C")
+my_mislabel_solver1 <- solve(my_mislabel_solver1)
 plot(my_mislabel_solver, filter_solved=FALSE)
 # plot(my_mislabel_solver, )
 my_mislabel_solver <- solve_comprehensive_search(my_mislabel_solver)
