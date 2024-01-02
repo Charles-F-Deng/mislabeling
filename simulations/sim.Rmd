@@ -1326,6 +1326,16 @@ handle_swaps_options <- names(swap_handlers)
 ```{r}
 
 ## Example values for testing
+# Number of subjects (10 - 10000, by=100 for first 1000, by 1000 after) (20)
+# Number of samples_per_subject (2 to 10, by=1) (10)
+# Number of swap_cat (1 to 5 groups, 5 to 20) (10)
+# Pct mislabeled (1 mislabel (first 10% by 1%, next by 5%, then by 10) to 100%) (20)
+# Pct anchor samples (0 to 10%, by=2) (5)
+# Pct ghost samples (0 to 10%, by=2) (5)
+# Pct deletions (can be left out of the grid)
+# Contaminated samples (like a ghost sample)
+# 5 seeds (5)
+
 local({
     n_subjects_per_group = 30
     n_samples_per_group = 150
@@ -1333,6 +1343,7 @@ local({
     n_features = 2
     n_mislabels = 100
     n_sv = 2
+    fraction_ghost = 0.05
     fraction_de_case = 0.5
     case_sd = 0.1
     subject_sd = 0.1
@@ -1351,6 +1362,7 @@ sim_mislabeled_data <- function (
     n_features,
     n_mislabels,
     n_sv,
+    fraction_ghost,
     fraction_de_case,
     case_sd,
     sv_sd,
@@ -1369,6 +1381,7 @@ sim_mislabeled_data <- function (
             "n_features",
             "n_mislabels",
             "n_sv",
+            "fraction_ghost",
             "fraction_de_case",
             "case_sd",
             "subject_sd",
@@ -1406,6 +1419,8 @@ sim_mislabeled_data <- function (
         n_mislabels >= 0 & n_mislabels != 1,
         n_mislabels <= n_samples,
         n_sv >= 0,
+        fraction_ghost >= 0,
+        fraction_ghost <= 1,
         fraction_de_case >= 0,
         fraction_de_case <= 1,
         case_sd >= 0,
@@ -1556,6 +1571,7 @@ sim_mislabeled_data <- function (
             "n_features",
             "n_mislabels",
             "n_sv",
+            "fraction_ghost",
             "fraction_de_case",
             "case_sd",
             "subject_sd",
@@ -1593,11 +1609,16 @@ sim_mislabeled_data <- function (
     ## Create mislabeled samples
     tsmsg(glue("Swapping samples with method: {swap_model}"))
     elist <- handle_swaps_function(elist, n_mislabels, swap_cats)
-
+    
+    # Remove genotype information from certain rownames(elist$targets)
+    tsmsg(glue("Deleting genotype information from {percent(fraction_ghost)} of samples"))
+    ghost_samples <- sample(rownames(elist$targets), round(fraction_ghost * n_samples), replace=FALSE)
+    elist$targets[ghost_samples, "Genotype_Group_ID"] <- NA_character_
+    
     ## Store original targets so we can access initial Sample_ID/E_Data 
     ## pairs to assess the results of the label correction algorithm
     elist$origs$targets_orig <- elist$targets
-
+    
     return(elist)
 }
 
@@ -2247,12 +2268,13 @@ elist_params <- my_params[names(my_params) != "handle_mislabels"]
 elist <- do.call(sim_mislabeled_data, elist_params)
 
 elist_params <- list(
-  n_subjects_per_group = 40,
-  n_samples_per_group = 150,
-  n_swap_cats = 1,
+  n_subjects_per_group = 30,
+  n_samples_per_group = 100,
+  n_swap_cats = 0,
   n_features = 10,
-  n_mislabels = 80,
+  n_mislabels = 30,
   n_sv = 5,
+  fraction_ghost = 0.10,
   fraction_de_case = 0.5,
   case_sd = 0.1,
   subject_sd = 0.1,
@@ -2261,7 +2283,7 @@ elist_params <- list(
   sv_sd = 0.1,
   resid_sd = 0.05,
   swap_model = "random_with_replacement",
-  seed = 1989)
+  seed = 1988)
 elist <- do.call(sim_mislabeled_data, elist_params)
 sample_genotype_data <- elist$targets %>%
     select(Sample_ID, Subject_ID, Genotype_Group_ID)
