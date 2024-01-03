@@ -439,7 +439,7 @@ generate_corrections_graph <- function(sample_genotype_data, plot=FALSE) {
 }
 
 swap_cats_to_matrix <- function(swap_cats) {
-    validate_swap_cats(swap_cats)
+    # validate_swap_cats(swap_cats)
     n <- nrow(swap_cats)
     if (ncol(swap_cats) < 2) {
         swap_cats_matrix <- matrix(TRUE, nrow=n, ncol=n)
@@ -1325,16 +1325,7 @@ handle_swaps_options <- names(swap_handlers)
 
 ```{r}
 
-## Example values for testing
-# Number of subjects (10 - 10000, by=100 for first 1000, by 1000 after) (20)
-# Number of samples_per_subject (2 to 10, by=1) (10)
-# Number of swap_cat (1 to 5 groups, 5 to 20) (10)
-# Pct mislabeled (1 mislabel (first 10% by 1%, next by 5%, then by 10) to 100%) (20)
-# Pct anchor samples (0 to 10%, by=2) (5)
-# Pct ghost samples (0 to 10%, by=2) (5)
-# Pct deletions (can be left out of the grid)
-# Contaminated samples (like a ghost sample)
-# 5 seeds (5)
+
 
 local({
     n_subjects_per_group = 30
@@ -2284,9 +2275,13 @@ elist_params <- list(
   resid_sd = 0.05,
   swap_model = "random_with_replacement",
   seed = 1988)
+fraction_anchor_sample <- 0.05
 elist <- do.call(sim_mislabeled_data, elist_params)
 sample_genotype_data <- elist$targets %>%
     select(Sample_ID, Subject_ID, Genotype_Group_ID)
+anchor_samples <- sample(elist$targets %>% 
+    filter(!Mislabeled) %>% 
+    pull(Sample_ID), 2*fraction_anchor_sample*(n_samples_per_group - n_mislabels))
 rownames(sample_genotype_data) <- NULL
 swap_cats <- elist$swap_cats
 
