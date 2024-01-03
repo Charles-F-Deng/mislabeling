@@ -18,12 +18,19 @@ library(igraph)
 as_data_frame <- igraph::as_data_frame
 library(assertthat)
 library(limma)
+library(this.path)
 column_to_rownames <- tibble::column_to_rownames
 rownames_to_column <- tibble::rownames_to_column
 
-setwd("/Users/charlesdeng/Workspace/mislabeling/simulations")
-source("sim_mislabeled_dataset.R")
-source("MislabelSolver.R")
+script_dir <- this.dir()
+source(file.path(script_dir, "sim_mislabeled_dataset.R"))
+source(file.path(script_dir, "MislabelSolver.R"))
+
+cmd_args <- commandArgs(trailingOnly = TRUE)
+arg_names <- c("n_subjects", "n_samples_per_subject", "n_swap_cats", "fraction_mislabel", 
+               "fraction_anchor", "fraction_ghost", "seed", "output_dir")
+args_list <- as.list(setNames(cmd_args, arg_names))
+for (index in 1:7) {args_list[[index]] <- as.numeric(args_list[[index]])}
 
 ## Example values for testing
 # Number of subjects (10 - 10000, by=100 for first 1000, by 1000 after) (20)
@@ -93,7 +100,11 @@ run_sim <- function(
         rename(Init_Sample_ID = Sample_ID,
                Init_Subject_ID = Subject_ID,
                True_Sample_ID = E_Sample_ID,
-               True_Subject_ID = E_Subject_ID)
+               True_Subject_ID = E_Subject_ID) %>% 
+        mutate(
+            Genotype_Group_ID = ifelse(Init_Sample_ID %in% ghost_samples, NA_character_, Genotype_Group_ID),
+            Is_Anchor = Init_Sample_ID %in% anchor_samples
+        )
     rownames(results_df) <- NULL
     join_cols <- c("Init_Sample_ID", "Init_Subject_ID", "Genotype_Group_ID", "Init_Component_ID")
     
@@ -147,5 +158,4 @@ run_sim <- function(
     write.csv(results_df, output_path)
 }
 
-run_sim(10, 4, 3, 0.10, 0.05, 0.05, 1986, output_dir="/Users/charlesdeng/Workspace/mislabeling/simulations")
-
+do.call(run_sim, args_list)
