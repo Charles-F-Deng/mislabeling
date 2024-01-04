@@ -28,20 +28,9 @@ source(file.path(script_dir, "MislabelSolver.R"))
 
 cmd_args <- commandArgs(trailingOnly = TRUE)
 arg_names <- c("n_subjects", "n_samples_per_subject", "n_swap_cats", "fraction_mislabel", 
-               "fraction_anchor", "fraction_ghost", "seed", "output_dir")
+               "fraction_anchor", "fraction_ghost", "seed", "output_path")
 args_list <- as.list(setNames(cmd_args, arg_names))
 for (index in 1:7) {args_list[[index]] <- as.numeric(args_list[[index]])}
-
-## Example values for testing
-# Number of subjects (10 - 10000, by=100 for first 1000, by 1000 after) (20)
-# Number of samples_per_subject (2 to 10, by=1) (10)
-# Number of swap_cat (1 to 5 groups, 5 to 20) (10)
-# Pct mislabeled (1 mislabel (first 10% by 1%, next by 5%, then by 10) to 100%) (20)
-# Pct anchor samples (0 to 10%, by=2) (5)
-# Pct ghost samples (0 to 10%, by=2) (5)
-# Pct deletions (can be left out of the grid)
-# Contaminated samples (like a ghost sample)
-# 5 seeds (5)
 
 # Column of relabels for each incremental improvement
 # 1. unambiguous majority
@@ -57,7 +46,7 @@ run_sim <- function(
         fraction_anchor, 
         fraction_ghost,
         seed,
-        output_dir) {
+        output_path) {
     
     n_subjects_per_group <- as.integer(n_subjects/2)
     n_samples_per_group <- n_subjects_per_group * n_samples_per_subject
@@ -151,10 +140,6 @@ run_sim <- function(
                Solved_ensemble = Solved)
     results_df <- results_df %>% full_join(curr_results_df)
     
-    run_sim_params <- c(n_subjects, n_samples_per_subject, n_swap_cats, fraction_mislabel,
-                fraction_anchor, fraction_ghost, seed)
-    output_file <- paste0(paste(run_sim_params, collapse = "-"), ".csv")
-    output_path <- file.path(output_dir, output_file)
     write.csv(results_df, output_path)
 }
 

@@ -339,6 +339,10 @@ setMethod("solve_local_search", "MislabelSolver",
 
 setMethod("solve", "MislabelSolver",
           function(object) {
+              
+              start_time <- Sys.time()
+              max_duration <- 120
+              
               while (TRUE) {
                   if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                       break
@@ -348,6 +352,12 @@ setMethod("solve", "MislabelSolver",
                   object <- solve_comprehensive_search(object)
                   object <- solve_majority_search(object)
                   object <- solve_comprehensive_search(object)
+                  
+                  elapsed_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+                  if (elapsed_time >= max_duration) {
+                      break
+                  }
+                  
                   object <- solve_local_search(object, n_iter=1)
                   
                   ## If current solve state is the same as previous, break
