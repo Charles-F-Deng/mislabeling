@@ -27,16 +27,24 @@ source(file.path(script_dir, "sim_mislabeled_dataset.R"))
 source(file.path(script_dir, "MislabelSolver.R"))
 
 cmd_args <- commandArgs(trailingOnly = TRUE)
-arg_names <- c("n_subjects", "n_samples_per_subject", "n_swap_cats", "fraction_mislabel", 
-               "fraction_anchor", "fraction_ghost", "seed", "output_path")
-args_list <- as.list(setNames(cmd_args, arg_names))
-for (index in 1:7) {args_list[[index]] <- as.numeric(args_list[[index]])}
+params_grid_file <- cmd_args[1]
 
 # Column of relabels for each incremental improvement
 # 1. unambiguous majority
 # 2. majority with cycle detection
 # 3. majority with comprehensive
 # 4. iterative ensemble with local search
+
+local({
+    n_subjects = 5000
+    n_samples_per_subject = 5
+    n_swap_cats = 1
+    fraction_mislabel = 0.10
+    fraction_anchor = 0.05
+    fraction_ghost = 0.05
+    seed = 1986
+    output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
+})
 
 run_sim <- function(
         n_subjects, 
@@ -55,36 +63,26 @@ run_sim <- function(
     n_anchor_samples <- as.integer(fraction_anchor * (n_samples - n_mislabels))
     n_ghost_samples <- as.integer(fraction_ghost * n_samples)
     
-    elist_params <- list(
+    sample_meta_data_params <- list(
         n_subjects_per_group = n_subjects_per_group,
         n_samples_per_group = n_samples_per_group,
         n_swap_cats = n_swap_cats,
         n_mislabels = n_mislabels,
-        seed = seed,
-        ## The rest of these inputs don't matter for the purpose of evaluating the MislabelSolver
-        n_features = 10,    
-        n_sv = 1,
-        fraction_de_case = 0.5,
-        case_sd = 0.1,
-        subject_sd = 0.1,
-        sex_sd = 0.1,
-        age_sd = 0.1,
-        sv_sd = 0.1,
-        resid_sd = 0.05
+        seed = seed
     )
-    elist <- do.call(sim_mislabeled_data, elist_params)
+    results_list <- do.call(sim_mislabeled_sample_meta_data, sample_meta_data_params)
+    sample_meta_data <- results_list$sample_meta_data
+    swap_cats <- results_list$swap_cats
     
-    sample_genotype_data <- elist$targets %>%
+    sample_genotype_data <- sample_meta_data %>%
         select(Sample_ID, Subject_ID, Genotype_Group_ID)
     ## Delete genotype information for ghost samples
     ghost_samples <- sample(rownames(sample_genotype_data), n_ghost_samples, replace=FALSE)
     sample_genotype_data[ghost_samples, "Genotype_Group_ID"] <- NA_character_
-    rownames(sample_genotype_data) <- NULL
-    swap_cats <- elist$swap_cats
-    anchor_samples <- sample(elist$targets %>% filter(!Mislabeled) %>% pull(Sample_ID), n_anchor_samples)
+    anchor_samples <- sample(sample_meta_data %>% filter(!Mislabeled) %>% pull(Sample_ID), n_anchor_samples)
     
-    mislabel_solver_initial <- new("MislabelSolver", sample_genotype_data, swap_cats, anchor_samples)
-    results_df <- elist$targets %>% 
+    mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats, anchor_samples)
+    results_df <- sample_meta_data %>% 
         select(Sample_ID, Subject_ID, Genotype_Group_ID, E_Sample_ID, E_Subject_ID, Mislabeled) %>% 
         rename(Init_Sample_ID = Sample_ID,
                Init_Subject_ID = Subject_ID,
@@ -94,12 +92,9 @@ run_sim <- function(
             Genotype_Group_ID = ifelse(Init_Sample_ID %in% ghost_samples, NA_character_, Genotype_Group_ID),
             Is_Anchor = Init_Sample_ID %in% anchor_samples
         )
-    rownames(results_df) <- NULL
-    join_cols <- c("Init_Sample_ID", "Init_Subject_ID", "Genotype_Group_ID", "Init_Component_ID")
     
     ## Create solve results
     # 1. Baseline majority search
-    mislabel_solver <- mislabel_solver_initial
     mislabel_solver <- solve_majority_search(mislabel_solver, unambiguous_only = TRUE)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
         select(Init_Sample_ID, Init_Component_ID, Sample_ID, Subject_ID, Solved) %>% 
@@ -109,7 +104,6 @@ run_sim <- function(
     results_df <- results_df %>% full_join(curr_results_df)
     
     # 2. Majority search with cycles
-    mislabel_solver <- mislabel_solver_initial
     mislabel_solver <- solve_majority_search(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
         select(Init_Sample_ID, Sample_ID, Subject_ID, Solved) %>% 
@@ -119,9 +113,6 @@ run_sim <- function(
     results_df <- results_df %>% full_join(curr_results_df)
     
     # 3. Majority search with comprehensive
-    mislabel_solver <- mislabel_solver_initial
-    mislabel_solver <- solve_comprehensive_search(mislabel_solver)
-    mislabel_solver <- solve_majority_search(mislabel_solver)
     mislabel_solver <- solve_comprehensive_search(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
         select(Init_Sample_ID, Sample_ID, Subject_ID, Solved) %>% 
@@ -131,7 +122,6 @@ run_sim <- function(
     results_df <- results_df %>% full_join(curr_results_df)
     
     # 4. Majority search iterative ensemble
-    mislabel_solver <- mislabel_solver_initial
     mislabel_solver <- solve(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
         select(Init_Sample_ID, Sample_ID, Subject_ID, Solved) %>% 
@@ -143,4 +133,10 @@ run_sim <- function(
     write.csv(results_df, output_path)
 }
 
-do.call(run_sim, args_list)
+params_grid <- readRDS(params_grid_file)
+for (i in 1:nrow(params_grid)) {
+    args_list <- as.list(params_grid[i, ])
+    sim_name <- args_list$sim_name
+    args_list <- args_list[!(names(args_list) %in% c("sim_name", "grid_batch_id"))]
+    do.call(run_sim, args_list)
+}

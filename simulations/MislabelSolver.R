@@ -29,7 +29,6 @@ setMethod("initialize", "MislabelSolver",
               .Object@swap_cats <- swap_cats
               .Object@anchor_samples <- anchor_samples
               
-              swap_cats_graph <- .swap_cats_to_graph(.Object@swap_cats)
               relabel_data <- .Object@sample_genotype_data %>% 
                   mutate(
                       Init_Sample_ID = Sample_ID,
@@ -42,7 +41,6 @@ setMethod("initialize", "MislabelSolver",
                                               Subject_ID = character(0))
               ambiguous_subjects <- list()
               .Object@.solve_state <- list(
-                  swap_cats_graph = swap_cats_graph,
                   relabel_data = relabel_data,
                   unsolved_relabel_data = unsolved_relabel_data,
                   unsolved_ghost_data = unsolved_ghost_data,
@@ -127,9 +125,9 @@ setMethod("solve_majority_search", "MislabelSolver",
               ## 2. Find relabel cycles
               unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data
               putative_subjects <- object@.solve_state$putative_subjects
-              swap_cats_graph <- object@.solve_state$swap_cats_graph
+              swap_cats <- object@swap_cats
               unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data
-              relabels <- .find_relabel_cycles_from_putative_subjects(unsolved_relabel_data, putative_subjects, swap_cats_graph, unsolved_ghost_data, unambiguous_only)
+              relabels <- .find_relabel_cycles_from_putative_subjects(unsolved_relabel_data, putative_subjects, swap_cats, unsolved_ghost_data, unambiguous_only)
               
               ## 3. Relabel samples and update solve state
               object <- .relabel_samples(object, relabels)
@@ -146,7 +144,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
               ## 1. Update putative subjects
               MAX_GENOTYPES <- 9
               component_ids <- unique(object@.solve_state$unsolved_relabel_data$Component_ID)
-              possible_neighbors <- .find_neighbors(object, include_ghost=TRUE)
+              # possible_neighbors <- .find_neighbors(object, include_ghost=TRUE)
               # all_relabels <- EMPTY_RELABELS
               for (component_id in component_ids) {
                   cc_unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == component_id)
@@ -205,7 +203,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   
                   ## Loop through tied solutions and track which one relabels the most samples
                   n_implied_mislabels_vec <- sort(unique(perm_genotypes$n_implied_mislabels))
-                  swap_cats_graph <- object@.solve_state$swap_cats_graph
+                  swap_cats <- object@swap_cats
                   min_implied_mislabels <- n_implied_mislabels_vec[[1]]
                   min_perm_genotypes <- perm_genotypes %>% 
                       filter(n_implied_mislabels == min_implied_mislabels)
@@ -219,7 +217,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                           rownames_to_column()
                       colnames(temp_putative_subjects) <- c("Genotype_Group_ID", "Subject_ID")
                       relabels <- .find_relabel_cycles_from_putative_subjects(
-                          cc_unsolved_relabel_data, temp_putative_subjects, swap_cats_graph, cc_unsolved_ghost_data)
+                          cc_unsolved_relabel_data, temp_putative_subjects, swap_cats, cc_unsolved_ghost_data)
                       n_samples_relabeled <- sum(relabels$relabel_from %in% cc_unsolved_relabel_data$Sample_ID)
                       n_ghosts_relabeled <- sum(relabels$relabel_from %in% cc_unsolved_ghost_data$Sample_ID)
                       min_perm_genotypes[row, "n_samples_relabeled"] <- n_samples_relabeled
@@ -263,10 +261,10 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
               ## Find relabel cycles
               unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data
               unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data
-              swap_cats_graph <- object@.solve_state$swap_cats_graph
+              swap_cats <- object@swap_cats
               putative_subjects <- object@.solve_state$putative_subjects
               relabels <- .find_relabel_cycles_from_putative_subjects(unsolved_relabel_data, putative_subjects, 
-                                                                      swap_cats_graph, unsolved_ghost_data)
+                                                                      swap_cats, unsolved_ghost_data)
               
               ## Relabel samples and update solve state
               object <- .relabel_samples(object, relabels) 
@@ -276,6 +274,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
 )
 
 setMethod("solve_local_search", "MislabelSolver",
+          ## TODO: calculate objective updates by component
           function(object, objective=c("genotype_entropy", "hamming_distance"), n_iter=1) {
               search_objectives <- list(
                   genotype_entropy = .objective_genotype_entropy,
@@ -355,6 +354,7 @@ setMethod("solve", "MislabelSolver",
                   
                   elapsed_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
                   if (elapsed_time >= max_duration) {
+                      warning(glue("Local search exceeded {max_duration} seconds"))
                       break
                   }
                   
@@ -673,7 +673,7 @@ setMethod("write_corrections", "MislabelSolver",
     return(object)
 }
 
-.find_relabel_cycles_from_putative_subjects <- function(unsolved_relabel_data, putative_subjects, swap_cats_graph, unsolved_ghost_data=NULL, unambiguous_only=FALSE) {
+.find_relabel_cycles_from_putative_subjects <- function(unsolved_relabel_data, putative_subjects, swap_cats, unsolved_ghost_data=NULL, unambiguous_only=FALSE) {
     mislabel_univ <- unsolved_relabel_data %>%
         left_join(putative_subjects %>% rename(Putative_Subject_ID = Subject_ID), 
                   by="Genotype_Group_ID") %>% 
@@ -770,7 +770,9 @@ setMethod("write_corrections", "MislabelSolver",
     }
     
     relabels_graph <- graph_from_adjacency_matrix(relabels_adjacency_mat, mode="directed")
-    relabels_graph <- graph.intersection(relabels_graph, swap_cats_graph, keep.all.vertices=FALSE)
+    swap_cats_filtered <- swap_cats[swap_cats$Sample_ID %in% V(relabels_graph)$name, ]
+    swap_cats_filtered_graph <- .swap_cats_to_graph(swap_cats_filtered)
+    relabels_graph <- graph.intersection(relabels_graph, swap_cats_filtered_graph, keep.all.vertices=FALSE)
     
     ## If unambiguous_only, only include samples with exactly one incoming and one outgoing edge
     if (unambiguous_only) {
@@ -1018,6 +1020,7 @@ setMethod("write_corrections", "MislabelSolver",
             sample_genotype_data[, c("Sample_ID", "Subject_ID", "Genotype_Group_ID")],
             by="Sample_ID"
         ) %>% 
+        filter(!is.na(Genotype_Group_ID)) %>% 
         group_by(Genotype_Group_ID) %>% 
         mutate(
             n_Subject_ID = length(unique(Subject_ID))
@@ -1030,9 +1033,11 @@ setMethod("write_corrections", "MislabelSolver",
         ungroup()
     subject_inconsistent_samples <- anchor_samples_consistency %>% 
         filter(n_Subject_ID != 1) %>% 
+        arrange(Sample_ID) %>% 
         pull(Sample_ID)
     genotype_inconsistent_samples <- anchor_samples_consistency %>% 
         filter(n_Genotype_Group_ID != 1) %>% 
+        arrange(Sample_ID) %>% 
         pull(Sample_ID)
     assert_that(
         length(subject_inconsistent_samples) == 0,
