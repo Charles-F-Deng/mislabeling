@@ -28,6 +28,7 @@ source(file.path(script_dir, "MislabelSolver.R"))
 
 cmd_args <- commandArgs(trailingOnly = TRUE)
 params_grid_file <- cmd_args[1]
+params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{basename(params_grid_file)}"))
 
 # Column of relabels for each incremental improvement
 # 1. unambiguous majority
@@ -134,9 +135,21 @@ run_sim <- function(
 }
 
 params_grid <- readRDS(params_grid_file)
+failed_sims <- params_grid[NULL,]
 for (i in 1:nrow(params_grid)) {
     args_list <- as.list(params_grid[i, ])
     sim_name <- args_list$sim_name
     args_list <- args_list[!(names(args_list) %in% c("sim_name", "grid_batch_id"))]
-    do.call(run_sim, args_list)
+    tryCatch(
+        expr = {
+            do.call(run_sim, args_list)
+        },
+        error = function(e){ 
+            print(paste("Error for sim_name:", sim_name))
+            ## Assignment in global scope
+            failed_sims <<- rbind(failed_sims, params_grid[i, ])
+        }
+    )
 }
+saveRDS(failed_sims, params_grid_errors_file)
+
