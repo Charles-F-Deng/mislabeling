@@ -57,6 +57,9 @@ run_sim <- function(
         seed,
         output_path) {
     
+    sim_name <- glue("{n_subjects}-{n_samples_per_subject}-{n_swap_cats}-{fraction_mislabel}-{fraction_anchor}-{fraction_ghost}-{seed}")
+    print(glue("Running simulation for {sim_name}"))
+    
     n_subjects_per_group <- as.integer(n_subjects/2)
     n_samples_per_group <- n_subjects_per_group * n_samples_per_subject
     n_samples <- n_samples_per_group * 2
@@ -102,7 +105,8 @@ run_sim <- function(
         rename(Sample_ID_baseline = Sample_ID,
                Subject_ID_baseline = Subject_ID,
                Solved_baseline = Solved)
-    results_df <- results_df %>% full_join(curr_results_df)
+    results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
+    print(glue("Baseline run for {sim_name}"))
     
     # 2. Majority search with cycles
     mislabel_solver <- solve_majority_search(mislabel_solver)
@@ -111,7 +115,8 @@ run_sim <- function(
         rename(Sample_ID_majority = Sample_ID,
                Subject_ID_majority = Subject_ID,
                Solved_majority = Solved)
-    results_df <- results_df %>% full_join(curr_results_df)
+    results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
+    print(glue("Majority run for {sim_name}"))
     
     # 3. Majority search with comprehensive
     mislabel_solver <- solve_comprehensive_search(mislabel_solver)
@@ -120,7 +125,8 @@ run_sim <- function(
         rename(Sample_ID_majority_comprehensive = Sample_ID,
                Subject_ID_majority_comprehensive = Subject_ID,
                Solved_majority_comprehensive = Solved)
-    results_df <- results_df %>% full_join(curr_results_df)
+    results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
+    print(glue("Majority w comprehensive run for {sim_name}"))
     
     # 4. Majority search iterative ensemble
     mislabel_solver <- solve(mislabel_solver)
@@ -129,9 +135,12 @@ run_sim <- function(
         rename(Sample_ID_ensemble = Sample_ID,
                Subject_ID_ensemble = Subject_ID,
                Solved_ensemble = Solved)
-    results_df <- results_df %>% full_join(curr_results_df)
+    results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
+    print(glue("Ensemble run for {sim_name}"))
     
+    print(glue("Writing output to {output_path}"))
     write.csv(results_df, output_path)
+    print(glue("Job complete for {sim_name}"))
 }
 
 params_grid <- readRDS(params_grid_file)
