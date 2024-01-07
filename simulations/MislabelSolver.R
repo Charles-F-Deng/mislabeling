@@ -547,7 +547,7 @@ setMethod("write_corrections", "MislabelSolver",
             n_Subject_ID = n_distinct(Subject_ID),
             n_Sample_ID = length(Sample_ID)
         ) %>%
-        mutate(Solved = n_Genotype_Group_ID == 1 & n_Subject_ID == 1)
+        mutate(Solved = n_Genotype_Group_ID <= 1 & n_Subject_ID == 1)
     
     solved_components <- component_data %>% filter(Solved) %>% pull(Component_ID)
     
@@ -810,7 +810,8 @@ setMethod("write_corrections", "MislabelSolver",
         ghost_relabel_data <- object@.solve_state$unsolved_ghost_data
     }
     combined_graph <- .generate_graph(relabel_data, graph_type="combined", ghost_relabel_data)
-    swap_cats_graph <- object@.solve_state$swap_cats_graph
+    swap_cats_filtered <- swap_cats[swap_cats$Sample_ID %in% V(combined_graph)$name, ]
+    swap_cats_graph <- .swap_cats_to_graph(swap_cats_filtered)
     v_filtered <- V(combined_graph)
     
     ## Criteria 1: filter out vertices that have at least 1 concordant edge

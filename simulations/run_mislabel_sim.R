@@ -37,12 +37,12 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 5000
+    n_subjects = 500
     n_samples_per_subject = 5
-    n_swap_cats = 1
-    fraction_mislabel = 0.10
-    fraction_anchor = 0.05
-    fraction_ghost = 0.05
+    n_swap_cats = 10
+    fraction_mislabel = 0.06
+    fraction_anchor = 0.0
+    fraction_ghost = 0.06
     seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
 })
@@ -81,9 +81,9 @@ run_sim <- function(
     sample_genotype_data <- sample_meta_data %>%
         select(Sample_ID, Subject_ID, Genotype_Group_ID)
     ## Delete genotype information for ghost samples
-    ghost_samples <- sample(rownames(sample_genotype_data), n_ghost_samples, replace=FALSE)
-    sample_genotype_data[ghost_samples, "Genotype_Group_ID"] <- NA_character_
-    anchor_samples <- sample(sample_meta_data %>% filter(!Mislabeled) %>% pull(Sample_ID), n_anchor_samples)
+    ghost_samples <- sample(sample_meta_data %>% pull(Sample_ID), n_ghost_samples, replace=FALSE)
+    sample_genotype_data[sample_genotype_data$Sample_ID %in% ghost_samples, "Genotype_Group_ID"] <- NA_character_
+    anchor_samples <- sample(sample_meta_data %>% filter(!Mislabeled) %>% pull(Sample_ID), n_anchor_samples, replace=FALSE)
     
     mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats, anchor_samples)
     results_df <- sample_meta_data %>% 
