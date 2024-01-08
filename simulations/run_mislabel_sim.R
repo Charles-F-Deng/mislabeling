@@ -19,6 +19,7 @@ as_data_frame <- igraph::as_data_frame
 library(assertthat)
 library(limma)
 library(this.path)
+library(entropy)
 column_to_rownames <- tibble::column_to_rownames
 rownames_to_column <- tibble::rownames_to_column
 
@@ -37,12 +38,12 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 500
-    n_samples_per_subject = 5
-    n_swap_cats = 10
+    n_subjects = 2500
+    n_samples_per_subject = 4
+    n_swap_cats = 4
     fraction_mislabel = 0.06
-    fraction_anchor = 0.0
-    fraction_ghost = 0.06
+    fraction_anchor = 0
+    fraction_ghost = 0
     seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
 })
@@ -87,7 +88,8 @@ run_sim <- function(
     
     mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats, anchor_samples)
     results_df <- sample_meta_data %>% 
-        select(Sample_ID, Subject_ID, Genotype_Group_ID, E_Sample_ID, E_Subject_ID, Mislabeled) %>% 
+        select(Sample_ID, Subject_ID, Genotype_Group_ID, E_Sample_ID, E_Subject_ID, Mislabeled) %>%
+        left_join(swap_cats, by="Sample_ID") %>% 
         rename(Init_Sample_ID = Sample_ID,
                Init_Subject_ID = Subject_ID,
                True_Sample_ID = E_Sample_ID,
