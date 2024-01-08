@@ -38,11 +38,11 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 2500
+    n_subjects = 250
     n_samples_per_subject = 4
-    n_swap_cats = 4
-    fraction_mislabel = 0.06
-    fraction_anchor = 0
+    n_swap_cats = 5
+    fraction_mislabel = 0.1
+    fraction_anchor = 0.06
     fraction_ghost = 0
     seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
@@ -156,7 +156,8 @@ for (i in 1:nrow(params_grid)) {
             do.call(run_sim, args_list)
         },
         error = function(e){ 
-            print(paste("Error for sim_name:", sim_name))
+            errorMessage <- paste("Error for sim_name:", sim_name, "\n", "Error message:", conditionMessage(e))
+            print(errorMessage)
             ## Assignment in global scope
             failed_sims <<- rbind(failed_sims, params_grid[i, ])
         }
