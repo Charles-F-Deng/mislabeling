@@ -810,6 +810,7 @@ setMethod("write_corrections", "MislabelSolver",
         ghost_relabel_data <- object@.solve_state$unsolved_ghost_data
     }
     combined_graph <- .generate_graph(relabel_data, graph_type="combined", ghost_relabel_data)
+    swap_cats <- object@swap_cats
     swap_cats_filtered <- swap_cats[swap_cats$Sample_ID %in% V(combined_graph)$name, ]
     swap_cats_graph <- .swap_cats_to_graph(swap_cats_filtered)
     v_filtered <- V(combined_graph)
