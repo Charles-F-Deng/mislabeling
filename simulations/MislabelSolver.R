@@ -1,3 +1,4 @@
+## TODO: SwapCat1 -> SwapCatID
 EMPTY_RELABELS <- data.frame(relabel_from=character(0), relabel_to=character(0))
 
 setClass("MislabelSolver",
@@ -141,23 +142,26 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   return(object)
               }
               
+              swap_cats <- object@swap_cats
+              
               ## 1. Update putative subjects
-              MAX_GENOTYPES <- 9
+              MAX_GENOTYPES <- 8
               component_ids <- unique(object@.solve_state$unsolved_relabel_data$Component_ID)
-              # possible_neighbors <- .find_neighbors(object, include_ghost=TRUE)
-              # all_relabels <- EMPTY_RELABELS
               for (component_id in component_ids) {
                   cc_unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == component_id)
                   cc_unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data %>% filter(Subject_ID %in% cc_unsolved_relabel_data$Subject_ID)
+                  cc_sample_ids <- c(cc_unsolved_relabel_data$Sample_ID, cc_unsolved_ghost_data$Sample_ID)
+                  cc_swap_cat_ids <- as.character(unique(swap_cats[swap_cats$Sample_ID %in% cc_sample_ids, "SwapCat1"]))
                   
                   ## For now, pass out of components where number of Genotype_Group(s) doesn't match number of Subject_ID(s)
                   if (length(unique(cc_unsolved_relabel_data$Genotype_Group_ID)) != length(unique(cc_unsolved_relabel_data$Subject_ID))) {
                       next
                   }
                   
+                  ## Lock genotypes that already have a putative subject assigned, and find all possible permutations for free genotypes
                   locked_genotypes <- object@.solve_state$putative_subjects %>% 
                       filter(Genotype_Group_ID %in% unique(cc_unsolved_relabel_data$Genotype_Group_ID))
-
+                  locked_genotypes <- data.frame(Subject_ID = character(0), Genotype_Group_ID = character(0))
                   free_genotypes <- setdiff(cc_unsolved_relabel_data$Genotype_Group_ID, locked_genotypes$Genotype_Group_ID)
                   free_subjects <- setdiff(cc_unsolved_relabel_data$Subject_ID, locked_genotypes$Subject_ID)
                   if (length(free_genotypes) > MAX_GENOTYPES) {
@@ -166,89 +170,169 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   if (length(free_genotypes) > 0) {
                       perm_genotypes <- as.data.frame(t(simplify2array(permn(free_subjects))))
                       colnames(perm_genotypes) <- sort(free_genotypes)
-                      for (genotype_id in locked_genotypes$Genotype_Group_ID) {
-                          subject_id <- locked_genotypes[locked_genotypes$Genotype_Group_ID == genotype_id, "Subject_ID"][[1]]
-                          perm_genotypes[[genotype_id]] <- subject_id
+                      for (locked_genotype_id in locked_genotypes$Genotype_Group_ID) {
+                          locked_subject_id <- locked_genotypes[locked_genotypes$Genotype_Group_ID == locked_genotype_id, "Subject_ID"][[1]]
+                          perm_genotypes[[locked_genotype_id]] <- locked_subject_id
                       }
                   } else {
                       perm_genotypes <- as.data.frame(t(locked_genotypes$Subject_ID))
                       colnames(perm_genotypes) <- locked_genotypes$Genotype_Group_ID
                   }
-                  perm_genotypes <- as.matrix(perm_genotypes)
+                  perm_genotypes <- as.matrix(perm_genotypes, dimnames=c("Permutation_ID", "Genotype_Group_ID"))
+                  n_perms <- nrow(perm_genotypes)
+                  rownames(perm_genotypes) <- paste0("Permutation", formatC(1:n_perms, width=nchar(n_perms), format="d", flag="0"))
+                  
+                  ## Create a "long" version of perm_genotypes that also has a column for SwapCat1
+                  temp_long_perm_genotypes <- melt(perm_genotypes)
+                  colnames(temp_long_perm_genotypes) <- c("Permutation_ID", "Genotype_Group_ID", "Subject_ID")
+                  long_perm_genotypes <- bind_rows(lapply(cc_swap_cat_ids, function(swap_cat_id) {
+                      df <- temp_long_perm_genotypes
+                      df$SwapCat1 <- swap_cat_id
+                      return(df)
+                  }))
+                  
+                  ## For each Genotype_Group_ID/Subject_ID permutation, determine
+                  ## 1. The number of existing samples to relabel
+                  ## 2. The number of ghost samples needed to add
+                  ## 3. The number of indels required after ghost samples are included
+                  label_counts <- cc_unsolved_relabel_data %>% 
+                      select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
+                      left_join(swap_cats, by="Sample_ID") %>% 
+                      group_by(Subject_ID, SwapCat1) %>% 
+                      summarize(n_labels = n(), .groups="drop") 
+                  ghost_label_counts <- cc_unsolved_ghost_data %>% 
+                      select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
+                      left_join(swap_cats, by="Sample_ID") %>% 
+                      group_by(Subject_ID, SwapCat1) %>% 
+                      summarize(n_ghost_labels = n(), .groups="drop") 
+                  genotype_counts <- cc_unsolved_relabel_data %>% 
+                      select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
+                      left_join(swap_cats, by="Sample_ID") %>% 
+                      group_by(Genotype_Group_ID, SwapCat1) %>% 
+                      summarize(n_genotypes = n(), .groups="drop")
+                  genotype_subject_concordant_counts <- cc_unsolved_relabel_data %>% 
+                      select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
+                      left_join(swap_cats, by="Sample_ID") %>% 
+                      group_by(Subject_ID, Genotype_Group_ID, SwapCat1) %>% 
+                      summarize(n_samples_correct = n(), .groups="drop")
+                  
+                  count_cols <- c("n_labels", "n_ghost_labels", "n_genotypes", "n_samples_correct")
+                  merged_long_perm_genotypes <- long_perm_genotypes %>% 
+                      left_join(label_counts, by=c("Subject_ID", "SwapCat1")) %>% 
+                      left_join(ghost_label_counts, by=c("Subject_ID", "SwapCat1")) %>% 
+                      left_join(genotype_counts, by=c("Genotype_Group_ID", "SwapCat1")) %>% 
+                      left_join(genotype_subject_concordant_counts, by=c("Subject_ID", "Genotype_Group_ID", "SwapCat1")) %>% 
+                      mutate_at(
+                          vars(all_of(count_cols)),
+                          ~coalesce(., 0)
+                      )
+                  merged_long_perm_genotypes <- merged_long_perm_genotypes %>% 
+                      mutate(
+                          ## In each genotype group, the number of samples that can be relabeled to a genotyped sample
+                          n_samples_to_relabel = pmin(n_genotypes, n_labels) - n_samples_correct,
+                          ## In each genotype group, the number of mislabled samples outstanding is
+                          ## n_genotypes - n_correct - n_samples_to_relabel. We try to plug this gap with ghost samples
+                          n_samples_to_relabel_ghost = pmin(n_genotypes - n_samples_correct - n_samples_to_relabel, n_ghost_labels),
+                          n_labels_deleted = pmax(0, n_genotypes - n_labels - n_ghost_labels),
+                          n_genotypes_deleted = pmax(0, n_labels - n_genotypes)
+                      ) %>% 
+                      arrange(Permutation_ID)
+                  
+                  ## Evaluate each permutation
+                  permutation_stats <- merged_long_perm_genotypes %>% 
+                      group_by(Permutation_ID) %>% 
+                      summarize(
+                          n_samples_correct = sum(n_samples_correct),
+                          n_samples_to_relabel = sum(n_samples_to_relabel),
+                          n_samples_to_relabel_ghost = sum(n_samples_to_relabel_ghost),
+                          n_labels_deleted = sum(n_labels_deleted),
+                          n_genotypes_deleted = sum(n_genotypes_deleted),
+                          .groups = "drop"
+                      ) %>% 
+                      mutate(
+                          ## 4 sample relabels is at most 2 mislabel events
+                          n_max_mislabel_events = ceiling(n_samples_to_relabel/2) + n_labels_deleted + n_genotypes_deleted
+                      ) %>% 
+                      arrange(n_max_mislabel_events)
+                  
+                  best_permutation <- perm_genotypes[permutation_stats$Permutation_ID[1], , drop=FALSE]
                   
                   ## For each Genotype_Group_ID/Subject_ID permutation, determine the implied Sample_ID/Subject_ID permutation
-                  perm_samples <- matrix(nrow=nrow(perm_genotypes), ncol=nrow(cc_unsolved_relabel_data), 
-                                         dimnames=list(NULL, cc_unsolved_relabel_data$Sample_ID))
-                  for (i in 1:nrow(perm_samples)) {
-                      perm_samples[i, ] <- perm_genotypes[i, ][cc_unsolved_relabel_data$Genotype_Group_ID]
-                  }
+                  # perm_samples <- matrix(nrow=nrow(perm_genotypes), ncol=nrow(cc_unsolved_relabel_data), 
+                  #                        dimnames=list(NULL, cc_unsolved_relabel_data$Sample_ID))
+                  # for (i in 1:nrow(perm_samples)) {
+                  #     perm_samples[i, ] <- perm_genotypes[i, ][cc_unsolved_relabel_data$Genotype_Group_ID]
+                  # }
                   
-                  ## For each Sample_ID/Subject_ID permutation, determine number of implied mislabels
-                  curr_subjects <- t(replicate(n=nrow(perm_samples), cc_unsolved_relabel_data$Subject_ID))
-                  colnames(curr_subjects) <- colnames(perm_samples)
-                  min_mislabels <- cc_unsolved_relabel_data %>% 
-                      group_by(Genotype_Group_ID) %>% 
-                      summarize(
-                          n = n(),
-                          n_max_count = max(table(Subject_ID)),
-                          n_min_mislabels = n - n_max_count
-                      )
-                  n_min_mislabels <- sum(min_mislabels$n_min_mislabels)
-                  perm_genotypes <- as.data.frame(perm_genotypes) %>% 
-                      mutate(
-                          n_min_mislabels = n_min_mislabels,
-                          n_implied_mislabels = rowSums(perm_samples != curr_subjects)
-                      ) %>% 
-                      arrange(n_implied_mislabels)
+                  ## For each Sample_ID/Subject_ID permutation, determine 
+                  ## 1. The number of existing samples to relabel
+                  ## 2. The number of ghost samples needed to add
+                  ## 3. The number of indels required after ghost samples are included
+                  # curr_subjects <- t(replicate(n=nrow(perm_samples), cc_unsolved_relabel_data$Subject_ID))
+                  # colnames(curr_subjects) <- colnames(perm_samples)
+                  # min_mislabels <- cc_unsolved_relabel_data %>% 
+                  #     group_by(Genotype_Group_ID) %>% 
+                  #     summarize(
+                  #         n = n(),
+                  #         n_max_count = max(table(Subject_ID)),
+                  #         n_min_mislabels = n - n_max_count
+                  #     )
+                  # n_min_mislabels <- sum(min_mislabels$n_min_mislabels)
+                  # perm_genotypes <- as.data.frame(perm_genotypes) %>% 
+                  #     mutate(
+                  #         n_min_mislabels = n_min_mislabels,
+                  #         n_implied_mislabels = rowSums(perm_samples != curr_subjects)
+                  #     ) %>% 
+                  #     arrange(n_implied_mislabels)
                   
                   ## Loop through tied solutions and track which one relabels the most samples
-                  n_implied_mislabels_vec <- sort(unique(perm_genotypes$n_implied_mislabels))
-                  swap_cats <- object@swap_cats
-                  min_implied_mislabels <- n_implied_mislabels_vec[[1]]
-                  min_perm_genotypes <- perm_genotypes %>% 
-                      filter(n_implied_mislabels == min_implied_mislabels)
-                  min_perm_genotypes$n_samples_relabeled <- NA_integer_
-                  min_perm_genotypes$n_ghosts_relabeled <- NA_integer_
-                  for (row in 1:nrow(min_perm_genotypes)) {
-                      temp_putative_subjects <- min_perm_genotypes[row, ] %>% 
-                          select(-n_min_mislabels, -n_implied_mislabels, -n_samples_relabeled, -n_ghosts_relabeled) %>% 
-                          t() %>% 
-                          as.data.frame() %>% 
-                          rownames_to_column()
-                      colnames(temp_putative_subjects) <- c("Genotype_Group_ID", "Subject_ID")
-                      relabels <- .find_relabel_cycles_from_putative_subjects(
-                          cc_unsolved_relabel_data, temp_putative_subjects, swap_cats, cc_unsolved_ghost_data)
-                      n_samples_relabeled <- sum(relabels$relabel_from %in% cc_unsolved_relabel_data$Sample_ID)
-                      n_ghosts_relabeled <- sum(relabels$relabel_from %in% cc_unsolved_ghost_data$Sample_ID)
-                      min_perm_genotypes[row, "n_samples_relabeled"] <- n_samples_relabeled
-                      min_perm_genotypes[row, "n_ghosts_relabeled"] <- n_ghosts_relabeled
-                  }
-                  min_perm_genotypes %<>%
-                      mutate(
-                          n_total_relabels = n_ghosts_relabeled + n_samples_relabeled,
-                          n_unfixed_mislabels = n_implied_mislabels - n_samples_relabeled
-                      ) %>% 
-                      arrange(n_unfixed_mislabels, n_ghosts_relabeled)
-                  
-                  ## If there were ties, track equal alternatives in .solve_state$ambiguous_subjects
-                  min_unfixed_mislabels <- min_perm_genotypes[1, "n_unfixed_mislabels"][[1]]
-                  min_ghosts_relabeled <- min_perm_genotypes[1, "n_ghosts_relabeled"][[1]]
-                  tied_solutions <- min_perm_genotypes %>% 
-                      filter(n_unfixed_mislabels == min_unfixed_mislabels,
-                             n_ghosts_relabeled == min_ghosts_relabeled) %>% 
-                      select(-n_min_mislabels, -n_implied_mislabels, -n_unfixed_mislabels, -n_total_relabels, 
-                             -n_samples_relabeled, -n_ghosts_relabeled)
-                  if (nrow(tied_solutions > 1)) {
-                      for (genotype_id in colnames(tied_solutions)) {
-                          unique_subject_ids <- unique(tied_solutions[[genotype_id]])
-                          if (length(unique_subject_ids) > 1) {
-                              object@.solve_state$ambiguous_subjects[[genotype_id]] <- unique_subject_ids
-                          }
-                      }
-                  }
+                  # n_implied_mislabels_vec <- sort(unique(perm_genotypes$n_implied_mislabels))
+                  # swap_cats <- object@swap_cats
+                  # min_implied_mislabels <- n_implied_mislabels_vec[[1]]
+                  # min_perm_genotypes <- perm_genotypes %>% 
+                  #     filter(n_implied_mislabels == min_implied_mislabels)
+                  # min_perm_genotypes$n_samples_relabeled <- NA_integer_
+                  # min_perm_genotypes$n_ghosts_relabeled <- NA_integer_
+                  # for (row in 1:nrow(min_perm_genotypes)) {
+                  #     temp_putative_subjects <- min_perm_genotypes[row, ] %>% 
+                  #         select(-n_min_mislabels, -n_implied_mislabels, -n_samples_relabeled, -n_ghosts_relabeled) %>% 
+                  #         t() %>% 
+                  #         as.data.frame() %>% 
+                  #         rownames_to_column()
+                  #     colnames(temp_putative_subjects) <- c("Genotype_Group_ID", "Subject_ID")
+                  #     relabels <- .find_relabel_cycles_from_putative_subjects(
+                  #         cc_unsolved_relabel_data, temp_putative_subjects, swap_cats, cc_unsolved_ghost_data)
+                  #     n_samples_relabeled <- sum(relabels$relabel_from %in% cc_unsolved_relabel_data$Sample_ID)
+                  #     n_ghosts_relabeled <- sum(relabels$relabel_from %in% cc_unsolved_ghost_data$Sample_ID)
+                  #     min_perm_genotypes[row, "n_samples_relabeled"] <- n_samples_relabeled
+                  #     min_perm_genotypes[row, "n_ghosts_relabeled"] <- n_ghosts_relabeled
+                  # }
+                  # min_perm_genotypes %<>%
+                  #     mutate(
+                  #         n_total_relabels = n_ghosts_relabeled + n_samples_relabeled,
+                  #         n_unfixed_mislabels = n_implied_mislabels - n_samples_relabeled
+                  #     ) %>% 
+                  #     arrange(n_unfixed_mislabels, n_ghosts_relabeled)
+                  # 
+                  # ## If there were ties, track equal alternatives in .solve_state$ambiguous_subjects
+                  # min_unfixed_mislabels <- min_perm_genotypes[1, "n_unfixed_mislabels"][[1]]
+                  # min_ghosts_relabeled <- min_perm_genotypes[1, "n_ghosts_relabeled"][[1]]
+                  # tied_solutions <- min_perm_genotypes %>% 
+                  #     filter(n_unfixed_mislabels == min_unfixed_mislabels,
+                  #            n_ghosts_relabeled == min_ghosts_relabeled) %>% 
+                  #     select(-n_min_mislabels, -n_implied_mislabels, -n_unfixed_mislabels, -n_total_relabels, 
+                  #            -n_samples_relabeled, -n_ghosts_relabeled)
+                  # if (nrow(tied_solutions > 1)) {
+                  #     for (genotype_id in colnames(tied_solutions)) {
+                  #         unique_subject_ids <- unique(tied_solutions[[genotype_id]])
+                  #         if (length(unique_subject_ids) > 1) {
+                  #             object@.solve_state$ambiguous_subjects[[genotype_id]] <- unique_subject_ids
+                  #         }
+                  #     }
+                  # }
                   
                   ## To find a single solution, take top row (fewest mislabels)
-                  new_putative_subjects <- tied_solutions[1, ] %>% 
+                  new_putative_subjects <- best_permutation %>% 
                       t() %>% 
                       as.data.frame() %>% 
                       rownames_to_column()
@@ -1227,6 +1311,7 @@ setMethod("write_corrections", "MislabelSolver",
 ################################################################################
 
 load_test_case <- function(test_name) {
+    library(openxlsx)
     setwd("/Users/charlesdeng/Workspace/mislabeling")
     sample_genotype_data <- read.xlsx("simulations/tests/sample_genotype_data_tests.xlsx", sheet=test_name)
     swap_cats <- NULL
@@ -1240,7 +1325,7 @@ load_test_case <- function(test_name) {
     return(my_mislabel_solver)
 }
 # my_mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats, anchor_samples); object <- my_mislabel_solver
-# my_mislabel_solver <- load_test_case("1-4C-1-2C-1G"); object <- my_mislabel_solver
+my_mislabel_solver <- load_test_case("2-2C"); object <- my_mislabel_solver
 # my_mislabel_solver <- load_test_case("1-3C-2G-unswapped"); object <- my_mislabel_solver
 # my_mislabel_solver <- load_test_case("comprehensive_search_puzzle"); object <- my_mislabel_solver
 # my_mislabel_solver <- load_test_case("1-4C-1-3C-1-2C-2G"); object <- my_mislabel_solver
