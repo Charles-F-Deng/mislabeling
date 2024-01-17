@@ -108,9 +108,9 @@ genswaps_random_with_replacement = function(sample_meta_data, n_mislabels, swap_
 
 local({
     n_subjects_per_group = 30
-    n_samples_per_group = 150
+    n_samples_per_group = 90
     n_swap_cats = 2
-    n_mislabels = 100
+    n_mislabels = 15
     seed = 1986
 })
 
