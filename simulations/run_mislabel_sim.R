@@ -15,6 +15,8 @@ subtract <- magrittr::subtract
 library(stringr)
 library(glue)
 library(igraph)
+library(openxlsx)
+library(reshape2)
 as_data_frame <- igraph::as_data_frame
 library(assertthat)
 library(limma)
@@ -38,12 +40,12 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 50
-    n_samples_per_subject = 3
-    n_swap_cats = 1
-    fraction_mislabel = 0.07
+    n_subjects = 300
+    n_samples_per_subject = 4
+    n_swap_cats = 2
+    fraction_mislabel = 0.15
     fraction_anchor = 0.0
-    fraction_ghost = 0.0
+    fraction_ghost = 0.05
     seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
 })
@@ -143,6 +145,35 @@ run_sim <- function(
     print(glue("Writing output to {output_path}"))
     write.csv(results_df, output_path)
     print(glue("Job complete for {sim_name}"))
+    return(results_df)
+    # solve_summary_df <- results_df %>%
+    #     select(True_Sample_ID, True_Subject_ID, Init_Sample_ID, Init_Subject_ID, Genotype_Group_ID,
+    #            Sample_ID_baseline, Subject_ID_baseline, Sample_ID_majority, Subject_ID_majority,
+    #            Sample_ID_majority_comprehensive, Subject_ID_majority_comprehensive, Sample_ID_ensemble, Subject_ID_ensemble) %>% 
+    #     mutate(Genotype_Group_ID = is.na(Genotype_Group_ID)) %>% 
+    #     dplyr::rename(Ghost = Genotype_Group_ID) %>% 
+    #     mutate(
+    #         Init_Subject_Mislabeled = Init_Subject_ID != True_Subject_ID,
+    #         Init_Sample_Mislabeled = Init_Sample_ID != True_Sample_ID,
+    #         Init_Subject_Mislabeled = Init_Subject_ID != True_Subject_ID,
+    #         Init_Sample_Mislabeled = Init_Sample_ID != True_Sample_ID,
+    #         Baseline_Relabeled = Sample_ID_baseline != Init_Sample_ID,
+    #         Baseline_Subject_Mislabeled = Subject_ID_baseline != True_Subject_ID,
+    #         Baseline_Sample_Mislabeled = Sample_ID_baseline != True_Sample_ID,
+    #         Majority_Relabeled = Sample_ID_majority != Init_Sample_ID,
+    #         Majority_Subject_Mislabeled = Subject_ID_majority != True_Subject_ID,
+    #         Majority_Sample_Mislabeled = Sample_ID_majority != True_Sample_ID,
+    #         Majority_Comp_Subject_Mislabeled = Subject_ID_majority_comprehensive != True_Subject_ID,
+    #         Majority_Comp_Sample_Mislabeled = Sample_ID_majority_comprehensive != True_Sample_ID,
+    #         Majority_Comp_Relabeled = Sample_ID_majority_comprehensive != Init_Sample_ID,
+    #         Majority_Comp_Subject_Relabeled_Correctly = Majority_Comp_Relabeled & !Majority_Comp_Subject_Relabeled,
+    #         Majority_Comp_Sample_Relabeled_Correctly = Majority_Comp_Relabeled & 
+    #         Ensemble_Subject_Mislabeled = Subject_ID_ensemble != True_Subject_ID,
+    #         Ensemble_Sample_Mislabeled = Sample_ID_ensemble != True_Sample_ID,
+    #         Ensemble_Relabeled = Sample_ID_ensemble != Init_Sample_ID,
+    #         Ensemble_Subject_Relabeled_Correctly = Ensemble_Relabeled & !Ensemble_Subject_Mislabeled,
+    #         Ensemble_Sample_Relabeled_Correctly = Ensemble_Relabeled & !Ensemble_Sample_Mislabeled
+    #     )
 }
 
 params_grid <- readRDS(params_grid_file)

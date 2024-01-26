@@ -8,3 +8,6 @@ CrossCheck/
 scripts/
 mislabels_lit_review/
 simulations/.Rhistory
+old/
+mscbb_check_results/
+corrections_*/
