@@ -24,6 +24,7 @@ library(this.path)
 library(entropy)
 column_to_rownames <- tibble::column_to_rownames
 rownames_to_column <- tibble::rownames_to_column
+library(gtools)
 
 script_dir <- this.dir()
 source(file.path(script_dir, "sim_mislabeled_dataset.R"))
