@@ -40,14 +40,15 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 1000
-    n_samples_per_subject = 5
-    n_swap_cats = 4
-    fraction_mislabel = 0.30
-    fraction_anchor = 0.10
-    fraction_ghost = 0.00
+    n_subjects = 2000
+    n_samples_per_subject = 10
+    n_swap_cats = 2
+    fraction_mislabel = 0.20
+    fraction_anchor = 0.05
+    fraction_ghost = 0.10
     seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
+    runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime"
 })
 
 run_sim <- function(
@@ -58,7 +59,8 @@ run_sim <- function(
         fraction_anchor, 
         fraction_ghost,
         seed,
-        output_path) {
+        output_path,
+        runtime_output_path=NULL) {
     
     sim_name <- glue("{n_subjects}-{n_samples_per_subject}-{n_swap_cats}-{fraction_mislabel}-{fraction_anchor}-{fraction_ghost}-{seed}")
     print(glue("Running simulation for {sim_name}"))
@@ -101,6 +103,13 @@ run_sim <- function(
             Is_Anchor = Init_Sample_ID %in% anchor_samples
         )
     
+    n_total_subject_mislabels <- sum((results_df$Init_Subject_ID != results_df$True_Subject_ID) & !is.na(results_df$Genotype_Group_ID))
+    n_total_sample_mislabels <- sum((results_df$Init_Sample_ID != results_df$True_Sample_ID) & !is.na(results_df$Genotype_Group_ID))
+    print(glue("{n_total_subject_mislabels} total subject mislabels"))
+    print(glue("{n_total_sample_mislabels} total sample mislabels"))
+    
+    start_time = Sys.time()
+    
     ## Create solve results
     # 1. Baseline majority search
     mislabel_solver <- solve_majority_search(mislabel_solver, unambiguous_only=TRUE)
@@ -112,6 +121,11 @@ run_sim <- function(
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
     print(glue("Baseline run for {sim_name}"))
     
+    n_baseline_subject_mislabels <- sum((results_df$Subject_ID_baseline != results_df$True_Subject_ID) & !is.na(results_df$Genotype_Group_ID))
+    n_baseline_sample_mislabels <- sum((results_df$Sample_ID_baseline != results_df$True_Sample_ID) & !is.na(results_df$Genotype_Group_ID))
+    print(glue("{n_baseline_subject_mislabels} subject mislabels after baseline"))
+    print(glue("{n_baseline_sample_mislabels} sample mislabels after baseline"))
+    
     # 2. Majority search with cycles
     mislabel_solver <- solve_majority_search(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
@@ -121,6 +135,11 @@ run_sim <- function(
                Solved_majority = Solved)
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
     print(glue("Majority run for {sim_name}"))
+    
+    n_majority_subject_mislabels <- sum((results_df$Subject_ID_majority != results_df$True_Subject_ID) & !is.na(results_df$Genotype_Group_ID))
+    n_majority_sample_mislabels <- sum((results_df$Sample_ID_majority != results_df$True_Sample_ID) & !is.na(results_df$Genotype_Group_ID))
+    print(glue("{n_majority_subject_mislabels} subject mislabels after majority"))
+    print(glue("{n_majority_sample_mislabels} sample mislabels after majority"))
     
     # 3. Majority search with comprehensive
     mislabel_solver <- solve_comprehensive_search(mislabel_solver)
@@ -132,6 +151,11 @@ run_sim <- function(
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
     print(glue("Majority w comprehensive run for {sim_name}"))
     
+    n_comprehensive_subject_mislabels <- sum((results_df$Subject_ID_majority_comprehensive != results_df$True_Subject_ID) & !is.na(results_df$Genotype_Group_ID))
+    n_comprehensive_sample_mislabels <- sum((results_df$Sample_ID_majority_comprehensive != results_df$True_Sample_ID) & !is.na(results_df$Genotype_Group_ID))
+    print(glue("{n_comprehensive_subject_mislabels} subject mislabels after comprehensive"))
+    print(glue("{n_comprehensive_sample_mislabels} sample mislabels after comprehensive"))
+    
     # 4. Majority search iterative ensemble
     mislabel_solver <- solve(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
@@ -142,49 +166,26 @@ run_sim <- function(
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
     print(glue("Ensemble run for {sim_name}"))
     
-    n_total_mislabels <- sum(results_df$Init_Sample_ID != results_df$True_Sample_ID)
-    n_baseline_mislabels <- sum(results_df$Sample_ID_baseline != results_df$True_Sample_ID)
-    n_majority_mislabels <- sum(results_df$Sample_ID_majority != results_df$True_Sample_ID)
-    n_comprehensive_mislabels <- sum(results_df$Sample_ID_majority_comprehensive != results_df$True_Sample_ID)
-    n_ensemble_mislabels <- sum(results_df$Sample_ID_ensemble != results_df$True_Sample_ID)
-
-    all_results <- c(n_total_mislabels, n_baseline_mislabels, n_majority_mislabels, n_comprehensive_mislabels, n_ensemble_mislabels)
-    names(all_results) <- c("total", "baseline", "majority", "comprehensive", "ensemble")
-    print(all_results)
+    n_ensemble_subject_mislabels <- sum((results_df$Subject_ID_ensemble != results_df$True_Subject_ID) & !is.na(results_df$Genotype_Group_ID))
+    n_ensemble_sample_mislabels <- sum((results_df$Sample_ID_ensemble != results_df$True_Sample_ID) & !is.na(results_df$Genotype_Group_ID))
+    print(glue("{n_ensemble_subject_mislabels} subject mislabels after ensemble"))
+    print(glue("{n_ensemble_sample_mislabels} sample mislabels after ensemble"))
+    
+    end_time = Sys.time()
     
     print(glue("Writing output to {output_path}"))
     write.csv(results_df, output_path)
+    if (!(is.null(runtime_output_path))) {
+        print(glue("Writing runtime to {runtime_output_path}"))
+        run_time <- end_time - start_time
+        writeLines(as.character(run_time), runtime_output_path)
+    }
+    
     print(glue("Job complete for {sim_name}"))
     return(results_df)
-    # solve_summary_df <- results_df %>%
-    #     select(True_Sample_ID, True_Subject_ID, Init_Sample_ID, Init_Subject_ID, Genotype_Group_ID,
-    #            Sample_ID_baseline, Subject_ID_baseline, Sample_ID_majority, Subject_ID_majority,
-    #            Sample_ID_majority_comprehensive, Subject_ID_majority_comprehensive, Sample_ID_ensemble, Subject_ID_ensemble) %>% 
-    #     mutate(Genotype_Group_ID = is.na(Genotype_Group_ID)) %>% 
-    #     dplyr::rename(Ghost = Genotype_Group_ID) %>% 
-    #     mutate(
-    #         Init_Subject_Mislabeled = Init_Subject_ID != True_Subject_ID,
-    #         Init_Sample_Mislabeled = Init_Sample_ID != True_Sample_ID,
-    #         Init_Subject_Mislabeled = Init_Subject_ID != True_Subject_ID,
-    #         Init_Sample_Mislabeled = Init_Sample_ID != True_Sample_ID,
-    #         Baseline_Relabeled = Sample_ID_baseline != Init_Sample_ID,
-    #         Baseline_Subject_Mislabeled = Subject_ID_baseline != True_Subject_ID,
-    #         Baseline_Sample_Mislabeled = Sample_ID_baseline != True_Sample_ID,
-    #         Majority_Relabeled = Sample_ID_majority != Init_Sample_ID,
-    #         Majority_Subject_Mislabeled = Subject_ID_majority != True_Subject_ID,
-    #         Majority_Sample_Mislabeled = Sample_ID_majority != True_Sample_ID,
-    #         Majority_Comp_Subject_Mislabeled = Subject_ID_majority_comprehensive != True_Subject_ID,
-    #         Majority_Comp_Sample_Mislabeled = Sample_ID_majority_comprehensive != True_Sample_ID,
-    #         Majority_Comp_Relabeled = Sample_ID_majority_comprehensive != Init_Sample_ID,
-    #         Majority_Comp_Subject_Relabeled_Correctly = Majority_Comp_Relabeled & !Majority_Comp_Subject_Relabeled,
-    #         Majority_Comp_Sample_Relabeled_Correctly = Majority_Comp_Relabeled & 
-    #         Ensemble_Subject_Mislabeled = Subject_ID_ensemble != True_Subject_ID,
-    #         Ensemble_Sample_Mislabeled = Sample_ID_ensemble != True_Sample_ID,
-    #         Ensemble_Relabeled = Sample_ID_ensemble != Init_Sample_ID,
-    #         Ensemble_Subject_Relabeled_Correctly = Ensemble_Relabeled & !Ensemble_Subject_Mislabeled,
-    #         Ensemble_Sample_Relabeled_Correctly = Ensemble_Relabeled & !Ensemble_Sample_Mislabeled
-    #     )
 }
+
+# test <- run_sim(n_subjects, n_samples_per_subject, n_swap_cats,fraction_mislabel, fraction_anchor, fraction_ghost, seed, output_path, runtime_output_path=NULL)
 
 params_grid <- readRDS(params_grid_file)
 failed_sims <- params_grid[NULL,]

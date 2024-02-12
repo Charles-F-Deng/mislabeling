@@ -113,7 +113,6 @@ setMethod("plot", "MislabelSolver",
                       return()
                   }
                   component_id <- component_id[[1]]
-                  print(component_id)
                   relabel_data <- relabel_data %>% filter(Init_Component_ID == component_id)
                   ghost_data <- ghost_data %>% filter(Init_Component_ID == component_id)
               }
@@ -204,7 +203,7 @@ setGeneric("solve_local_search", function(object, ...) {
 })
 
 setGeneric("solve_local_search_bulk", function(object, ...) {
-    standardGeneric("solve_local_search")
+    standardGeneric("solve_local_search_bulk")
 })
 
 setGeneric("solve", function(object, ...) {
@@ -270,7 +269,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   return(object)
               }
               
-              # swap_cats <- object@swap_cats
+              swap_cats <- object@swap_cats
               putative_subjects <- object@.solve_state$putative_subjects
               
               ## 1. Update putative subjects
@@ -284,7 +283,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   # length(unique(cc_unsolved_relabel_data$Genotype_Group_ID)) > length(unique(cc_unsolved_relabel_data$Subject_ID))
                   ## For now, pass out of components where number of Genotype_Group(s) is greater than number of Subject_ID(s)
                   if (length(unique(cc_unsolved_relabel_data$Genotype_Group_ID)) > length(unique(cc_unsolved_relabel_data$Subject_ID))) {
-                      print(component_id)
+                      # print(component_id)
                       next
                   }
                   
