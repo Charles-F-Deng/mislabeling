@@ -40,12 +40,12 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 300
-    n_samples_per_subject = 4
-    n_swap_cats = 2
-    fraction_mislabel = 0.15
-    fraction_anchor = 0.0
-    fraction_ghost = 0.05
+    n_subjects = 1000
+    n_samples_per_subject = 5
+    n_swap_cats = 4
+    fraction_mislabel = 0.30
+    fraction_anchor = 0.10
+    fraction_ghost = 0.00
     seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
 })
@@ -103,7 +103,7 @@ run_sim <- function(
     
     ## Create solve results
     # 1. Baseline majority search
-    mislabel_solver <- solve_majority_search(mislabel_solver, unambiguous_only = TRUE)
+    mislabel_solver <- solve_majority_search(mislabel_solver, unambiguous_only=TRUE)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
         select(Init_Sample_ID, Init_Component_ID, Sample_ID, Subject_ID, Solved) %>% 
         rename(Sample_ID_baseline = Sample_ID,
@@ -141,6 +141,16 @@ run_sim <- function(
                Solved_ensemble = Solved)
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
     print(glue("Ensemble run for {sim_name}"))
+    
+    n_total_mislabels <- sum(results_df$Init_Sample_ID != results_df$True_Sample_ID)
+    n_baseline_mislabels <- sum(results_df$Sample_ID_baseline != results_df$True_Sample_ID)
+    n_majority_mislabels <- sum(results_df$Sample_ID_majority != results_df$True_Sample_ID)
+    n_comprehensive_mislabels <- sum(results_df$Sample_ID_majority_comprehensive != results_df$True_Sample_ID)
+    n_ensemble_mislabels <- sum(results_df$Sample_ID_ensemble != results_df$True_Sample_ID)
+
+    all_results <- c(n_total_mislabels, n_baseline_mislabels, n_majority_mislabels, n_comprehensive_mislabels, n_ensemble_mislabels)
+    names(all_results) <- c("total", "baseline", "majority", "comprehensive", "ensemble")
+    print(all_results)
     
     print(glue("Writing output to {output_path}"))
     write.csv(results_df, output_path)

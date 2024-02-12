@@ -42,12 +42,12 @@ genswaps_random_with_replacement = function(sample_meta_data, n_mislabels, swap_
     ## Figure out the maximum number of new mislabels you can make
     ## since samples that are singletons in their swap_cats cannot be mislabeled
     swap_cats_counts <- swap_cats %>%
-        group_by(SwapCat1) %>% 
+        group_by(SwapCat_ID) %>% 
         summarize(n_samples = n(), prob = n_samples/nrow(swap_cats))
-    all_swap_cats <- swap_cats_counts$SwapCat1
-    single_vertex_swap_cats <- swap_cats_counts[swap_cats_counts$n_samples == 1, "SwapCat1"]
+    all_swap_cats <- swap_cats_counts$SwapCat_ID
+    single_vertex_swap_cats <- swap_cats_counts[swap_cats_counts$n_samples == 1, "SwapCat_ID"]
     eligible_swap_cats <- all_swap_cats[!(all_swap_cats %in% single_vertex_swap_cats)]
-    single_vertices <- swap_cats[swap_cats$SwapCat1 %in% single_vertex_swap_cats, "Sample_ID"]
+    single_vertices <- swap_cats[swap_cats$SwapCat_ID %in% single_vertex_swap_cats, "Sample_ID"]
     n_correct_labels <- nrow(sample_meta_data %>% filter(!Mislabeled))
     n_max_new_mislabels <- n_correct_labels - length(single_vertices)
     assert_that(n_mislabels <= n_correct_labels, 
@@ -58,12 +58,12 @@ genswaps_random_with_replacement = function(sample_meta_data, n_mislabels, swap_
     while (n_curr_mislabels < n_goal_mislabels) {
         sample_mislabels <- sample_meta_data[sample_meta_data$Mislabeled, "Sample_ID"]
         n_new_mislabels <- n_goal_mislabels - n_curr_mislabels
-        sampled_swap_cats <- sample(swap_cats_counts$SwapCat1, size=n_new_mislabels, replace=TRUE, prob=swap_cats_counts$prob)
+        sampled_swap_cats <- sample(swap_cats_counts$SwapCat_ID, size=n_new_mislabels, replace=TRUE, prob=swap_cats_counts$prob)
         sample_counts <- 5*2*table(sampled_swap_cats)
         samples_to_swap <- c()
         for (swap_cat_name in names(sample_counts)) {
             num_to_sample <- sample_counts[swap_cat_name]
-            new_samples_to_swap <- sample(swap_cats[swap_cats$SwapCat1 == swap_cat_name, "Sample_ID"], num_to_sample, replace=TRUE)
+            new_samples_to_swap <- sample(swap_cats[swap_cats$SwapCat_ID == swap_cat_name, "Sample_ID"], num_to_sample, replace=TRUE)
             samples_to_swap <- c(samples_to_swap, new_samples_to_swap)
         }
         edges <- matrix(samples_to_swap, ncol = 2, byrow = TRUE) %>% 
@@ -107,10 +107,10 @@ genswaps_random_with_replacement = function(sample_meta_data, n_mislabels, swap_
 }
 
 local({
-    n_subjects_per_group = 30
-    n_samples_per_group = 90
-    n_swap_cats = 2
-    n_mislabels = 15
+    n_subjects_per_group = 5000
+    n_samples_per_group = 5
+    n_swap_cats = 3
+    n_mislabels = 5*5000*.10
     seed = 1986
 })
 
@@ -191,7 +191,7 @@ sim_mislabeled_sample_meta_data <- function (
     swap_cats = data.frame(Sample_ID=sample_meta_data$Sample_ID)
     if (n_swap_cats > 0) {
         swap_cat_groups <- generate_ids("SwapCat_Group", n_swap_cats)
-        swap_cats[["SwapCat1"]] <- as.factor(sample(swap_cat_groups, nrow(sample_meta_data), replace=TRUE))
+        swap_cats[["SwapCat_ID"]] <- as.factor(sample(swap_cat_groups, nrow(sample_meta_data), replace=TRUE))
     }
     
     sample_meta_data <- as.data.frame(sample_meta_data)
