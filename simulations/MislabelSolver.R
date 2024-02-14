@@ -297,6 +297,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   if (length(free_genotypes) > MAX_GENOTYPES_COMP_SEARCH) {
                       next
                   }
+                  
                   if (length(free_genotypes) > 0 & length(free_subjects) > 0) {
                       n <- length(free_subjects)
                       r <- length(free_genotypes)
@@ -315,17 +316,8 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   }
                   perm_genotypes <- as.matrix(perm_genotypes, dimnames=c("Permutation_ID", "Genotype_Group_ID"))
                   n_perms <- nrow(perm_genotypes)
-                  rownames(perm_genotypes) <- paste0("Permutation", formatC(1:n_perms, width=nchar(n_perms), format="d", flag="0"))
-                  
-                  ## Create a "long" version of perm_genotypes that also has a column for SwapCat_ID
-                  temp_long_perm_genotypes <- melt(perm_genotypes)
-                  colnames(temp_long_perm_genotypes) <- c("Permutation_ID", "Genotype_Group_ID", "Subject_ID")
-                  temp_long_perm_genotypes <- as.data.frame(lapply(temp_long_perm_genotypes, as.character))
-                  long_perm_genotypes <- bind_rows(lapply(cc_swap_cat_ids, function(swap_cat_id) {
-                      df <- temp_long_perm_genotypes
-                      df$SwapCat_ID <- swap_cat_id
-                      return(df)
-                  }))
+                  permutation_ids <- paste0("Permutation", formatC(1:n_perms, width=nchar(n_perms), format="d", flag="0"))
+                  rownames(perm_genotypes) <- permutation_ids
                   
                   ## For each Genotype_Group_ID/Subject_ID permutation, determine
                   ## 1. The number of existing samples to relabel
@@ -352,56 +344,65 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                       group_by(Subject_ID, Genotype_Group_ID, SwapCat_ID) %>% 
                       summarize(n_samples_correct = n(), .groups="drop")
                   
-                  count_cols <- c("n_labels", "n_ghost_labels", "n_in_genotype", "n_samples_correct")
-                  merged_long_perm_genotypes <- long_perm_genotypes %>% 
-                      left_join(label_counts, by=c("Subject_ID", "SwapCat_ID")) %>% 
-                      left_join(ghost_label_counts, by=c("Subject_ID", "SwapCat_ID")) %>% 
-                      left_join(genotype_counts, by=c("Genotype_Group_ID", "SwapCat_ID")) %>% 
-                      left_join(genotype_subject_concordant_counts, by=c("Subject_ID", "Genotype_Group_ID", "SwapCat_ID")) %>% 
-                      mutate_at(
-                          vars(all_of(count_cols)),
-                          ~coalesce(., 0)
-                      )
-                  merged_long_perm_genotypes <- merged_long_perm_genotypes %>% 
-                      mutate(
-                          ## In each genotype group, the number of samples that can be relabeled to a genotyped sample
-                          n_samples_to_relabel = pmin(n_in_genotype, n_labels) - n_samples_correct,
-                          ## In each genotype group, the number of mislabeled samples outstanding is
-                          ## n_genotypes - n_correct - n_samples_to_relabel. We try to plug this gap with ghost samples
-                          n_samples_to_relabel_ghost = pmin(n_in_genotype - n_samples_correct - n_samples_to_relabel, n_ghost_labels),
-                          n_label_deletions = pmax(0, n_in_genotype - n_labels - n_ghost_labels),
-                          n_genotype_deletions = pmax(0, n_labels - n_in_genotype)
-                      ) %>% 
-                      arrange(Permutation_ID)
+                  ## Create a "long" version of perm_genotypes
+                  long_perm_genotypes <- melt(perm_genotypes)
+                  colnames(long_perm_genotypes) <- c("Permutation_ID", "Genotype_Group_ID", "Subject_ID")
+                  long_perm_genotypes <- as.data.frame(lapply(long_perm_genotypes, as.character))
                   
-                  ## Evaluate each permutation
-                  permutation_stats <- merged_long_perm_genotypes %>% 
-                      group_by(Permutation_ID, SwapCat_ID) %>% 
-                      summarize(
-                          n_samples_correct = sum(n_samples_correct),
-                          n_samples_to_relabel = sum(n_samples_to_relabel),
-                          n_samples_to_relabel_ghost = sum(n_samples_to_relabel_ghost),
-                          n_genotype_deletions = sum(n_genotype_deletions),
-                          n_label_deletions = sum(n_label_deletions),
-                          .groups = "drop"               
-                      ) %>%
-                      mutate(
-                          n_samples_to_relabel = n_samples_to_relabel + pmin(n_genotype_deletions, n_samples_to_relabel_ghost),
-                          n_genotype_deletions = pmax(0, n_genotype_deletions - n_samples_to_relabel_ghost)
-                      ) %>% 
-                      group_by(Permutation_ID) %>% 
-                      summarize(
-                          n_samples_correct = sum(n_samples_correct),
-                          n_samples_to_relabel = sum(n_samples_to_relabel),
-                          n_samples_to_relabel_ghost = sum(n_samples_to_relabel_ghost),
-                          n_genotype_deletions = sum(n_genotype_deletions),
-                          n_label_deletions = sum(n_label_deletions),
-                          .groups = "drop"
-                      ) %>% 
-                      mutate(
-                          ## The weighting scheme is arbitrary right now
-                          perm_score = n_samples_to_relabel + 1.5 * n_samples_to_relabel_ghost + 2 * (n_genotype_deletions + n_label_deletions)
-                      ) %>% 
+                  ## Create an empty matrix of stats for each permutation
+                  count_cols <- c("n_labels", "n_ghost_labels", "n_in_genotype", "n_samples_correct")
+                  permutation_stats <- matrix(0, nrow=n_perms, ncol=length(count_cols))
+                  colnames(permutation_stats) <- count_cols
+                  rownames(permutation_stats) <- permutation_ids
+                  for (swap_cat_id in cc_swap_cat_ids) {
+                      long_perm_genotypes$SwapCat_ID <- swap_cat_id
+                      
+                      merged_long_perm_genotypes <- long_perm_genotypes %>% 
+                          left_join(label_counts, by=c("Subject_ID", "SwapCat_ID")) %>% 
+                          left_join(ghost_label_counts, by=c("Subject_ID", "SwapCat_ID")) %>% 
+                          left_join(genotype_counts, by=c("Genotype_Group_ID", "SwapCat_ID")) %>% 
+                          left_join(genotype_subject_concordant_counts, by=c("Subject_ID", "Genotype_Group_ID", "SwapCat_ID")) %>% 
+                          mutate_at(
+                              vars(all_of(count_cols)),
+                              ~coalesce(., 0)
+                          )
+                      merged_long_perm_genotypes <- merged_long_perm_genotypes %>% 
+                          mutate(
+                              ## In each genotype group, the number of samples that can be relabeled to a genotyped sample
+                              n_samples_to_relabel = pmin(n_in_genotype, n_labels) - n_samples_correct,
+                              ## In each genotype group, the number of mislabeled samples outstanding is
+                              ## n_genotypes - n_correct - n_samples_to_relabel. We try to plug this gap with ghost samples
+                              n_samples_to_relabel_ghost = pmin(n_in_genotype - n_samples_correct - n_samples_to_relabel, n_ghost_labels),
+                              n_label_deletions = pmax(0, n_in_genotype - n_labels - n_ghost_labels),
+                              n_genotype_deletions = pmax(0, n_labels - n_in_genotype)
+                          ) %>% 
+                          arrange(Permutation_ID)
+                      
+                      ## Evaluate each permutation
+                      swap_cat_perm_stats <- merged_long_perm_genotypes %>% 
+                          group_by(Permutation_ID) %>% 
+                          summarize(
+                              n_samples_correct = sum(n_samples_correct),
+                              n_samples_to_relabel = sum(n_samples_to_relabel),
+                              n_samples_to_relabel_ghost = sum(n_samples_to_relabel_ghost),
+                              n_genotype_deletions = sum(n_genotype_deletions),
+                              n_label_deletions = sum(n_label_deletions),
+                              .groups = "drop"               
+                          ) %>%
+                          mutate(
+                              n_samples_to_relabel = n_samples_to_relabel + pmin(n_genotype_deletions, n_samples_to_relabel_ghost),
+                              n_genotype_deletions = pmax(0, n_genotype_deletions - n_samples_to_relabel_ghost),
+                              ## The weighting scheme is arbitrary right now
+                              perm_score = n_samples_to_relabel + 1.5 * n_samples_to_relabel_ghost + 2 * (n_genotype_deletions + n_label_deletions)
+                          ) %>% 
+                          column_to_rownames("Permutation_ID")
+                      
+                      permutation_stats <- permutation_stats + swap_cat_perm_stats
+                  }
+                  
+                  permutation_stats <- permutation_stats %>%
+                      as.data.frame() %>% 
+                      rownames_to_column("Permutation_ID") %>% 
                       arrange(perm_score)
                   
                   ## To find a single solution, take top row
@@ -1968,6 +1969,187 @@ load_test_case <- function(test_name) {
 #     relabels <- .find_all_relabel_cycles(relabels_graph)
 #     return(relabels)
 # }
+
+
+# setMethod("solve_comprehensive_search", "MislabelSolver",
+#           function(object) {
+#               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
+#                   return(object)
+#               }
+#               
+#               swap_cats <- object@swap_cats
+#               putative_subjects <- object@.solve_state$putative_subjects
+#               
+#               ## 1. Update putative subjects
+#               component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
+#               for (component_id in component_ids) {
+#                   cc_unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == component_id)
+#                   cc_unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data %>% filter(Component_ID == component_id)
+#                   # cc_unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data %>% filter(Subject_ID %in% cc_unsolved_relabel_data$Subject_ID)
+#                   cc_sample_ids <- c(cc_unsolved_relabel_data$Sample_ID, cc_unsolved_ghost_data$Sample_ID)
+#                   cc_swap_cat_ids <- as.character(unique(swap_cats[swap_cats$Sample_ID %in% cc_sample_ids, "SwapCat_ID", drop=TRUE]))
+#                   # length(unique(cc_unsolved_relabel_data$Genotype_Group_ID)) > length(unique(cc_unsolved_relabel_data$Subject_ID))
+#                   ## For now, pass out of components where number of Genotype_Group(s) is greater than number of Subject_ID(s)
+#                   if (length(unique(cc_unsolved_relabel_data$Genotype_Group_ID)) > length(unique(cc_unsolved_relabel_data$Subject_ID))) {
+#                       # print(component_id)
+#                       next
+#                   }
+#                   
+#                   ## Lock genotypes that already have a putative subject assigned, and find all possible permutations for free genotypes
+#                   cc_genotypes <- unique(cc_unsolved_relabel_data$Genotype_Group_ID)
+#                   cc_subjects <- unique(cc_unsolved_relabel_data$Subject_ID)
+#                   locked_genotypes <- intersect(putative_subjects$Genotype_Group_ID, cc_genotypes)
+#                   locked_subjects <- intersect(putative_subjects$Subject_ID, cc_subjects)
+#                   free_genotypes <- setdiff(cc_genotypes, locked_genotypes)
+#                   free_subjects <- setdiff(cc_subjects, locked_subjects)
+#                   if (length(free_genotypes) > MAX_GENOTYPES_COMP_SEARCH) {
+#                       next
+#                   }
+#                   
+#                   if (length(free_genotypes) > 0 & length(free_subjects) > 0) {
+#                       n <- length(free_subjects)
+#                       r <- length(free_genotypes)
+#                       perm_genotypes <- permutations(n, r, free_subjects)
+#                       colnames(perm_genotypes) <- sort(free_genotypes)
+#                       n_perm <- nrow(perm_genotypes)
+#                       for (locked_genotype_id in locked_genotypes) {
+#                           locked_subject_id <- putative_subjects[putative_subjects$Genotype_Group_ID == locked_genotype_id, "Subject_ID"][[1]]
+#                           new_perm_col <- matrix(data=locked_subject_id, ncol=1, nrow=n_perm, dimnames=list(NULL, locked_genotype_id))
+#                           perm_genotypes <- cbind(perm_genotypes, new_perm_col)
+#                       }
+#                   } else {
+#                       locked_putative_subjects <- putative_subjects[putative_subjects$Genotype_Group_ID %in% locked_genotypes, ]
+#                       perm_genotypes <- t(locked_putative_subjects$Subject_ID)
+#                       colnames(perm_genotypes) <- locked_putative_subjects$Genotype_Group_ID
+#                   }
+#                   perm_genotypes <- as.matrix(perm_genotypes, dimnames=c("Permutation_ID", "Genotype_Group_ID"))
+#                   n_perms <- nrow(perm_genotypes)
+#                   rownames(perm_genotypes) <- paste0("Permutation", formatC(1:n_perms, width=nchar(n_perms), format="d", flag="0"))
+#                   
+#                   ## Create a "long" version of perm_genotypes that also has a column for SwapCat_ID
+#                   temp_long_perm_genotypes <- melt(perm_genotypes)
+#                   colnames(temp_long_perm_genotypes) <- c("Permutation_ID", "Genotype_Group_ID", "Subject_ID")
+#                   temp_long_perm_genotypes <- as.data.frame(lapply(temp_long_perm_genotypes, as.character))
+#                   long_perm_genotypes <- bind_rows(lapply(cc_swap_cat_ids, function(swap_cat_id) {
+#                       df <- temp_long_perm_genotypes
+#                       df$SwapCat_ID <- swap_cat_id
+#                       return(df)
+#                   }))
+#                   
+#                   ## For each Genotype_Group_ID/Subject_ID permutation, determine
+#                   ## 1. The number of existing samples to relabel
+#                   ## 2. The number of ghost samples needed to add
+#                   ## 3. The number of indels required after ghost samples are included
+#                   label_counts <- cc_unsolved_relabel_data %>% 
+#                       select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
+#                       left_join(swap_cats, by="Sample_ID") %>% 
+#                       group_by(Subject_ID, SwapCat_ID) %>% 
+#                       summarize(n_labels = n(), .groups="drop") 
+#                   ghost_label_counts <- cc_unsolved_ghost_data %>% 
+#                       select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
+#                       left_join(swap_cats, by="Sample_ID") %>% 
+#                       group_by(Subject_ID, SwapCat_ID) %>% 
+#                       summarize(n_ghost_labels = n(), .groups="drop") 
+#                   genotype_counts <- cc_unsolved_relabel_data %>% 
+#                       select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
+#                       left_join(swap_cats, by="Sample_ID") %>% 
+#                       group_by(Genotype_Group_ID, SwapCat_ID) %>% 
+#                       summarize(n_in_genotype = n(), .groups="drop")
+#                   genotype_subject_concordant_counts <- cc_unsolved_relabel_data %>% 
+#                       select(Sample_ID, Subject_ID, Genotype_Group_ID) %>% 
+#                       left_join(swap_cats, by="Sample_ID") %>% 
+#                       group_by(Subject_ID, Genotype_Group_ID, SwapCat_ID) %>% 
+#                       summarize(n_samples_correct = n(), .groups="drop")
+#                   
+#                   count_cols <- c("n_labels", "n_ghost_labels", "n_in_genotype", "n_samples_correct")
+#                   merged_long_perm_genotypes <- long_perm_genotypes %>% 
+#                       left_join(label_counts, by=c("Subject_ID", "SwapCat_ID")) %>% 
+#                       left_join(ghost_label_counts, by=c("Subject_ID", "SwapCat_ID")) %>% 
+#                       left_join(genotype_counts, by=c("Genotype_Group_ID", "SwapCat_ID")) %>% 
+#                       left_join(genotype_subject_concordant_counts, by=c("Subject_ID", "Genotype_Group_ID", "SwapCat_ID")) %>% 
+#                       mutate_at(
+#                           vars(all_of(count_cols)),
+#                           ~coalesce(., 0)
+#                       )
+#                   merged_long_perm_genotypes <- merged_long_perm_genotypes %>% 
+#                       mutate(
+#                           ## In each genotype group, the number of samples that can be relabeled to a genotyped sample
+#                           n_samples_to_relabel = pmin(n_in_genotype, n_labels) - n_samples_correct,
+#                           ## In each genotype group, the number of mislabeled samples outstanding is
+#                           ## n_genotypes - n_correct - n_samples_to_relabel. We try to plug this gap with ghost samples
+#                           n_samples_to_relabel_ghost = pmin(n_in_genotype - n_samples_correct - n_samples_to_relabel, n_ghost_labels),
+#                           n_label_deletions = pmax(0, n_in_genotype - n_labels - n_ghost_labels),
+#                           n_genotype_deletions = pmax(0, n_labels - n_in_genotype)
+#                       ) %>% 
+#                       arrange(Permutation_ID)
+#                   
+#                   ## Evaluate each permutation
+#                   permutation_stats <- merged_long_perm_genotypes %>% 
+#                       group_by(Permutation_ID, SwapCat_ID) %>% 
+#                       summarize(
+#                           n_samples_correct = sum(n_samples_correct),
+#                           n_samples_to_relabel = sum(n_samples_to_relabel),
+#                           n_samples_to_relabel_ghost = sum(n_samples_to_relabel_ghost),
+#                           n_genotype_deletions = sum(n_genotype_deletions),
+#                           n_label_deletions = sum(n_label_deletions),
+#                           .groups = "drop"               
+#                       ) %>%
+#                       mutate(
+#                           n_samples_to_relabel = n_samples_to_relabel + pmin(n_genotype_deletions, n_samples_to_relabel_ghost),
+#                           n_genotype_deletions = pmax(0, n_genotype_deletions - n_samples_to_relabel_ghost)
+#                       ) %>% 
+#                       group_by(Permutation_ID) %>% 
+#                       summarize(
+#                           n_samples_correct = sum(n_samples_correct),
+#                           n_samples_to_relabel = sum(n_samples_to_relabel),
+#                           n_samples_to_relabel_ghost = sum(n_samples_to_relabel_ghost),
+#                           n_genotype_deletions = sum(n_genotype_deletions),
+#                           n_label_deletions = sum(n_label_deletions),
+#                           .groups = "drop"
+#                       ) %>% 
+#                       mutate(
+#                           ## The weighting scheme is arbitrary right now
+#                           perm_score = n_samples_to_relabel + 1.5 * n_samples_to_relabel_ghost + 2 * (n_genotype_deletions + n_label_deletions)
+#                       ) %>% 
+#                       arrange(perm_score)
+#                   
+#                   ## To find a single solution, take top row
+#                   best_permutation <- perm_genotypes[permutation_stats$Permutation_ID[1], , drop=FALSE]
+#                   new_putative_subjects <- best_permutation %>% 
+#                       t() %>% 
+#                       as.data.frame() %>% 
+#                       tibble::rownames_to_column()
+#                   colnames(new_putative_subjects) <- c("Genotype_Group_ID", "Subject_ID")
+#                   ## Specify when a Subject_ID in the component doesn't have a Genotype_Group_ID, or vice versa
+#                   if (length(cc_genotypes) > length(cc_subjects)) {
+#                       unmatched_genotypes <- setdiff(cc_genotypes, new_putative_subjects$Genotype_Group_ID)
+#                       new_putative_subjects <- rbind(new_putative_subjects, 
+#                                                      data.frame(Genotype_Group_ID = unmatched_genotypes, Subject_ID = NA_character_))
+#                   }
+#                   if (length(cc_genotypes) < length(cc_subjects)) {
+#                       unmatched_subjects <- setdiff(cc_subjects, new_putative_subjects$Subject_ID)
+#                       new_putative_subjects <- rbind(new_putative_subjects, 
+#                                                      data.frame(Genotype_Group_ID = NA_character_, Subject_ID = unmatched_subjects))
+#                   }
+#                   new_putative_subjects <- new_putative_subjects %>%  
+#                       anti_join(object@.solve_state$putative_subjects, by=c("Genotype_Group_ID", "Subject_ID"))
+#                   object <- .update_putative_subjects(object, new_putative_subjects)
+#               }
+#               
+#               ## Find relabel cycles
+#               unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data
+#               unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data
+#               swap_cats <- object@swap_cats
+#               putative_subjects <- object@.solve_state$putative_subjects
+#               relabels <- .find_relabel_cycles_from_putative_subjects(unsolved_relabel_data, putative_subjects, 
+#                                                                       swap_cats, unsolved_ghost_data, allow_unknowns=TRUE)
+#               
+#               ## Relabel samples and update solve state
+#               object <- .relabel_samples(object, relabels) 
+#               
+#               return(object)
+#           }
+# )
 
 
 

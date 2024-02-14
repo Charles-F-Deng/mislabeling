@@ -27,6 +27,7 @@ rownames_to_column <- tibble::rownames_to_column
 library(gtools)
 
 script_dir <- this.dir()
+#script_dir <- "/sc/arion/projects/mscic1/results/Charles/mislabeling_simulations/mislabeling/simulations"
 source(file.path(script_dir, "sim_mislabeled_dataset.R"))
 source(file.path(script_dir, "MislabelSolver.R"))
 
@@ -41,16 +42,26 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 2000
-    n_samples_per_subject = 10
-    n_swap_cats = 2
-    fraction_mislabel = 0.20
-    fraction_anchor = 0.05
-    fraction_ghost = 0.10
+    n_subjects = 10000
+    n_samples_per_subject = 2
+    n_swap_cats = 20
+    fraction_mislabel = 0.15
+    fraction_anchor = 0.08
+    fraction_ghost = 0.04
     seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
     runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime"
 })
+
+## all is 5352.4
+## to 118 is 1982 (swapping samples)
+## to 149 is 1094.1 (baseline + majority)
+## to 163 is 747 (comprehensive)
+## to 180 is 3673.5 (ensemble)
+
+## Just comprehensive: 1861.5
+## Just majority:
+## Just one iter local: 
 
 run_sim <- function(
         n_subjects, 
@@ -174,19 +185,21 @@ run_sim <- function(
     
     end_time = Sys.time()
     
-    print(glue("Writing output to {output_path}"))
-    write.csv(results_df, output_path)
-    if (!(is.null(runtime_output_path))) {
-        print(glue("Writing runtime to {runtime_output_path}"))
-        run_time <- end_time - start_time
-        writeLines(as.character(run_time), runtime_output_path)
-    }
-    
-    print(glue("Job complete for {sim_name}"))
-    return(results_df)
+    # print(glue("Writing output to {output_path}"))
+    # write.csv(results_df, output_path)
+    # if (!(is.null(runtime_output_path))) {
+    #     print(glue("Writing runtime to {runtime_output_path}"))
+    #     run_time <- end_time - start_time
+    #     writeLines(as.character(run_time), runtime_output_path)
+    # }
+    # 
+    # print(glue("Job complete for {sim_name}"))
+    # return(results_df)
 }
 
 # test <- run_sim(n_subjects, n_samples_per_subject, n_swap_cats,fraction_mislabel, fraction_anchor, fraction_ghost, seed, output_path, runtime_output_path=NULL)
+
+args_list = list(n_subjects = 250, n_samples_per_subject = 6, n_swap_cats = 20, fraction_mislabel = 0.2, fraction_anchor = 0.08, fraction_ghost = 0.04, seed = 1986, output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv", runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime")
 
 params_grid <- readRDS(params_grid_file)
 failed_sims <- params_grid[NULL,]
@@ -194,7 +207,7 @@ for (i in 1:nrow(params_grid)) {
     args_list <- as.list(params_grid[i, ])
     sim_name <- args_list$sim_name
     args_list <- args_list[!(names(args_list) %in% c("sim_name", "grid_batch_id"))]
-    tryCatch(
+    ram_ <- peakRAM(tryCatch(
         expr = {
             do.call(run_sim, args_list)
         },
@@ -202,9 +215,10 @@ for (i in 1:nrow(params_grid)) {
             errorMessage <- paste("Error for sim_name:", sim_name, "\n", "Error message:", conditionMessage(e))
             print(errorMessage)
             ## Assignment in global scope
-            failed_sims <<- rbind(failed_sims, params_grid[i, ])
+            # failed_sims <<- rbind(failed_sims, params_grid[i, ])
         }
-    )
+    ))
+    
 }
 saveRDS(failed_sims, params_grid_errors_file)
 
