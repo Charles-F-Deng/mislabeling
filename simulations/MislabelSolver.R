@@ -275,21 +275,22 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
               ## 1. Update putative subjects
               component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
               for (component_id in component_ids) {
+                  # print(component_id)
                   cc_unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == component_id)
                   cc_unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data %>% filter(Component_ID == component_id)
                   # cc_unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data %>% filter(Subject_ID %in% cc_unsolved_relabel_data$Subject_ID)
                   cc_sample_ids <- c(cc_unsolved_relabel_data$Sample_ID, cc_unsolved_ghost_data$Sample_ID)
                   cc_swap_cat_ids <- as.character(unique(swap_cats[swap_cats$Sample_ID %in% cc_sample_ids, "SwapCat_ID", drop=TRUE]))
+                  cc_genotypes <- unique(cc_unsolved_relabel_data$Genotype_Group_ID)
+                  cc_subjects <- unique(cc_unsolved_relabel_data$Subject_ID)
                   # length(unique(cc_unsolved_relabel_data$Genotype_Group_ID)) > length(unique(cc_unsolved_relabel_data$Subject_ID))
                   ## For now, pass out of components where number of Genotype_Group(s) is greater than number of Subject_ID(s)
-                  if (length(unique(cc_unsolved_relabel_data$Genotype_Group_ID)) > length(unique(cc_unsolved_relabel_data$Subject_ID))) {
+                  if (length(cc_genotypes) > length(cc_subjects)) {
                       # print(component_id)
                       next
                   }
                   
                   ## Lock genotypes that already have a putative subject assigned, and find all possible permutations for free genotypes
-                  cc_genotypes <- unique(cc_unsolved_relabel_data$Genotype_Group_ID)
-                  cc_subjects <- unique(cc_unsolved_relabel_data$Subject_ID)
                   locked_genotypes <- intersect(putative_subjects$Genotype_Group_ID, cc_genotypes)
                   locked_subjects <- intersect(putative_subjects$Subject_ID, cc_subjects)
                   free_genotypes <- setdiff(cc_genotypes, locked_genotypes)
@@ -355,8 +356,10 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   colnames(permutation_stats) <- count_cols
                   rownames(permutation_stats) <- permutation_ids
                   for (swap_cat_id in cc_swap_cat_ids) {
+                      ## Remove after simulations are done
                       long_perm_genotypes$SwapCat_ID <- swap_cat_id
                       
+                      ## Join in ascending order of size
                       merged_long_perm_genotypes <- long_perm_genotypes %>% 
                           left_join(label_counts, by=c("Subject_ID", "SwapCat_ID")) %>% 
                           left_join(ghost_label_counts, by=c("Subject_ID", "SwapCat_ID")) %>% 
@@ -406,7 +409,9 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                       arrange(perm_score)
                   
                   ## To find a single solution, take top row
+                  ## TODO: record any ties
                   best_permutation <- perm_genotypes[permutation_stats$Permutation_ID[1], , drop=FALSE]
+                  
                   new_putative_subjects <- best_permutation %>% 
                       t() %>% 
                       as.data.frame() %>% 
@@ -1051,6 +1056,9 @@ setMethod("write_corrections", "MislabelSolver",
     return(object)
 }
 
+## NOTE: realized that "allow_unknowns" and "allow_ghosts" only works when all samples in the component have
+## been genotyped. That's fine for now since we only call this with these parameters
+## after comprehensive search but it's not ideal, go back and fix this logic
 .find_relabel_cycles_from_putative_subjects <- function(unsolved_relabel_data, 
                                                          putative_subjects, 
                                                          swap_cats, 
@@ -1186,7 +1194,7 @@ setMethod("write_corrections", "MislabelSolver",
         all_excess_labels <- names(V(relabels_graph)[degree(relabels_graph, mode = "in") == 0])
         V(relabels_graph)$relabel_component_id <- components(relabels_graph)$membership
         all_relabel_component_ids <- unique(V(relabels_graph)$relabel_component_id)
-        ## For each component, connect ghost labels with labels that have no more incoming edges, 
+        ## For each component, connect unknown labels with labels that have no more incoming edges, 
         ## indicating that there are no genotyped samples that can take their label
         for (curr_relabel_component_id in all_relabel_component_ids) {
             component_labels <- names(V(relabels_graph)[V(relabels_graph)$relabel_component_id == curr_relabel_component_id])
@@ -1361,12 +1369,12 @@ setMethod("write_corrections", "MislabelSolver",
         msg = glue("'putative_subjects' is missing required column(s) {paste(missing_columns, collapse=\", \")}")
     )
     
-    extra_genotype_groups <- setdiff(putative_subjects$Genotype_Group_ID, sample_genotype_data$Genotype_Group_ID)
+    extra_genotype_groups <- setdiff(na.omit(putative_subjects$Genotype_Group_ID), sample_genotype_data$Genotype_Group_ID)
     assert_that(
         length(extra_genotype_groups) == 0,
         msg = glue("'putative_subjects' has 'Genotype_Group_ID'(s) not found in 'sample_genotype_data', check {paste(extra_genotype_groups, collapse=\", \")}")
     )
-    extra_subjects <- setdiff(putative_subjects$Subject_ID, sample_genotype_data$Subject_ID)
+    extra_subjects <- setdiff(na.omit(putative_subjects$Subject_ID), sample_genotype_data$Subject_ID)
     assert_that(
         length(extra_subjects) == 0,
         msg = glue("'putative_subjects' has 'Subject_ID'(s) not found in 'sample_genotype_data', check {paste(extra_subjects, collapse=\", \")}")

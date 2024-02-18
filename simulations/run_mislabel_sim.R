@@ -42,12 +42,12 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 10000
+    n_subjects = 7500
     n_samples_per_subject = 2
-    n_swap_cats = 20
-    fraction_mislabel = 0.15
-    fraction_anchor = 0.08
-    fraction_ghost = 0.04
+    n_swap_cats = 3
+    fraction_mislabel = 0.06
+    fraction_anchor = 0.0
+    fraction_ghost = 0.0
     seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
     runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime"
@@ -199,7 +199,7 @@ run_sim <- function(
 
 # test <- run_sim(n_subjects, n_samples_per_subject, n_swap_cats,fraction_mislabel, fraction_anchor, fraction_ghost, seed, output_path, runtime_output_path=NULL)
 
-args_list = list(n_subjects = 250, n_samples_per_subject = 6, n_swap_cats = 20, fraction_mislabel = 0.2, fraction_anchor = 0.08, fraction_ghost = 0.04, seed = 1986, output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv", runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime")
+# args_list = list(n_subjects = 250, n_samples_per_subject = 6, n_swap_cats = 20, fraction_mislabel = 0.2, fraction_anchor = 0.08, fraction_ghost = 0.04, seed = 1986, output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv", runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime")
 
 params_grid <- readRDS(params_grid_file)
 failed_sims <- params_grid[NULL,]
@@ -207,18 +207,20 @@ for (i in 1:nrow(params_grid)) {
     args_list <- as.list(params_grid[i, ])
     sim_name <- args_list$sim_name
     args_list <- args_list[!(names(args_list) %in% c("sim_name", "grid_batch_id"))]
-    ram_ <- peakRAM(tryCatch(
+    if (file.exists(args_list$output_path) {next}
+    ram_ <- tryCatch(
         expr = {
-            do.call(run_sim, args_list)
+            if (!file.exists(args_list$output_path)) {
+                peakRAM(do.call(run_sim, args_list))
+            }
         },
         error = function(e){ 
             errorMessage <- paste("Error for sim_name:", sim_name, "\n", "Error message:", conditionMessage(e))
             print(errorMessage)
             ## Assignment in global scope
-            # failed_sims <<- rbind(failed_sims, params_grid[i, ])
+            failed_sims <<- rbind(failed_sims, params_grid[i, ])
         }
-    ))
-    
+    )
 }
 saveRDS(failed_sims, params_grid_errors_file)
 
