@@ -222,5 +222,5 @@ for (i in 1:nrow(params_grid)) {
         }
     )
 }
-saveRDS(failed_sims, params_grid_errors_file)
+# saveRDS(failed_sims, params_grid_errors_file)
 
