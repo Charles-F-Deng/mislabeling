@@ -25,6 +25,7 @@ library(entropy)
 column_to_rownames <- tibble::column_to_rownames
 rownames_to_column <- tibble::rownames_to_column
 library(gtools)
+library(peakRAM)
 
 script_dir <- this.dir()
 #script_dir <- "/sc/arion/projects/mscic1/results/Charles/mislabeling_simulations/mislabeling/simulations"
