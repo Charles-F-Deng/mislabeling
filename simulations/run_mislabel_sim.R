@@ -207,7 +207,7 @@ for (i in 1:nrow(params_grid)) {
     args_list <- as.list(params_grid[i, ])
     sim_name <- args_list$sim_name
     args_list <- args_list[!(names(args_list) %in% c("sim_name", "grid_batch_id"))]
-    if (file.exists(args_list$output_path) {next}
+    if (file.exists(args_list$output_path)) {next}
     ram_ <- tryCatch(
         expr = {
             if (!file.exists(args_list$output_path)) {
