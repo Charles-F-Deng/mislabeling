@@ -186,16 +186,16 @@ run_sim <- function(
     
     end_time = Sys.time()
     
-    # print(glue("Writing output to {output_path}"))
-    # write.csv(results_df, output_path)
-    # if (!(is.null(runtime_output_path))) {
-    #     print(glue("Writing runtime to {runtime_output_path}"))
-    #     run_time <- end_time - start_time
-    #     writeLines(as.character(run_time), runtime_output_path)
-    # }
-    # 
-    # print(glue("Job complete for {sim_name}"))
-    # return(results_df)
+    print(glue("Writing output to {output_path}"))
+    write.csv(results_df, output_path)
+    if (!(is.null(runtime_output_path))) {
+        print(glue("Writing runtime to {runtime_output_path}"))
+        run_time <- end_time - start_time
+        writeLines(as.character(run_time), runtime_output_path)
+    }
+
+    print(glue("Job complete for {sim_name}"))
+    return(results_df)
 }
 
 # test <- run_sim(n_subjects, n_samples_per_subject, n_swap_cats,fraction_mislabel, fraction_anchor, fraction_ghost, seed, output_path, runtime_output_path=NULL)
