@@ -2,6 +2,8 @@ library(rlang)
 library(withr)
 library(rex)
 library(dplyr)
+library(visNetwork)
+library(Matrix)
 library(combinat)
 filter <- dplyr::filter
 select <- dplyr::select
@@ -43,13 +45,13 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 7500
-    n_samples_per_subject = 2
+    n_subjects = 5
+    n_samples_per_subject = 8
     n_swap_cats = 3
-    fraction_mislabel = 0.06
+    fraction_mislabel = 0.3
     fraction_anchor = 0.0
-    fraction_ghost = 0.0
-    seed = 1986
+    fraction_ghost = 0.00
+    seed = 1990
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
     runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime"
 })
@@ -127,8 +129,9 @@ run_sim <- function(
     # 1. Baseline majority search
     mislabel_solver <- solve_majority_search(mislabel_solver, unambiguous_only=TRUE)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
-        select(Init_Sample_ID, Init_Component_ID, Sample_ID, Subject_ID, Solved) %>% 
-        rename(Sample_ID_baseline = Sample_ID,
+        select(Init_Sample_ID, Init_Component_ID, Sample_ID, Subject_ID, Solved, Component_ID) %>% 
+        rename(Baseline_Component_ID = Component_ID,
+               Sample_ID_baseline = Sample_ID,
                Subject_ID_baseline = Subject_ID,
                Solved_baseline = Solved)
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
@@ -142,8 +145,9 @@ run_sim <- function(
     # 2. Majority search with cycles
     mislabel_solver <- solve_majority_search(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
-        select(Init_Sample_ID, Sample_ID, Subject_ID, Solved) %>% 
-        rename(Sample_ID_majority = Sample_ID,
+        select(Init_Sample_ID, Sample_ID, Subject_ID, Solved, Component_ID) %>% 
+        rename(Majority_Component_ID = Component_ID,
+               Sample_ID_majority = Sample_ID,
                Subject_ID_majority = Subject_ID,
                Solved_majority = Solved)
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
@@ -157,8 +161,9 @@ run_sim <- function(
     # 3. Majority search with comprehensive
     mislabel_solver <- solve_comprehensive_search(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
-        select(Init_Sample_ID, Sample_ID, Subject_ID, Solved) %>% 
-        rename(Sample_ID_majority_comprehensive = Sample_ID,
+        select(Init_Sample_ID, Sample_ID, Subject_ID, Solved, Component_ID) %>% 
+        rename(Majority_Comprehensive_Component_ID = Component_ID,
+            Sample_ID_majority_comprehensive = Sample_ID,
                Subject_ID_majority_comprehensive = Subject_ID,
                Solved_majority_comprehensive = Solved)
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
@@ -172,8 +177,9 @@ run_sim <- function(
     # 4. Majority search iterative ensemble
     mislabel_solver <- solve(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
-        select(Init_Sample_ID, Sample_ID, Subject_ID, Solved) %>% 
-        rename(Sample_ID_ensemble = Sample_ID,
+        select(Init_Sample_ID, Sample_ID, Subject_ID, Solved, Component_ID) %>% 
+        rename(Ensemble_Component_ID = Component_ID,
+               Sample_ID_ensemble = Sample_ID,
                Subject_ID_ensemble = Subject_ID,
                Solved_ensemble = Solved)
     results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
@@ -209,9 +215,10 @@ for (i in 1:nrow(params_grid)) {
     sim_name <- args_list$sim_name
     args_list <- args_list[!(names(args_list) %in% c("sim_name", "grid_batch_id"))]
     if (file.exists(args_list$output_path)) {next}
-    ram_ <- tryCatch(
+    tryCatch(
         expr = {
             if (!file.exists(args_list$output_path)) {
+                memory.limit(size = 4000)
                 peakRAM(do.call(run_sim, args_list))
             }
         },
