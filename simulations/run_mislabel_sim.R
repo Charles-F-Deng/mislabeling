@@ -27,6 +27,7 @@ library(entropy)
 column_to_rownames <- tibble::column_to_rownames
 rownames_to_column <- tibble::rownames_to_column
 library(gtools)
+library(tools)
 library(peakRAM)
 
 script_dir <- this.dir()
@@ -76,6 +77,12 @@ run_sim <- function(
         seed,
         output_path,
         runtime_output_path=NULL) {
+    
+    file_name <- file_path_sans_ext(basename(output_path))
+    project_dir <- dirname(dirname(output_path))
+    
+    ## Create tracker to show we tried this sim
+    file.create(file.path(project_dir, "1_tried", file_name))
     
     sim_name <- glue("{n_subjects}-{n_samples_per_subject}-{n_swap_cats}-{fraction_mislabel}-{fraction_anchor}-{fraction_ghost}-{seed}")
     print(glue("Running simulation for {sim_name}"))
@@ -174,6 +181,10 @@ run_sim <- function(
     print(glue("{n_comprehensive_subject_mislabels} subject mislabels after comprehensive"))
     print(glue("{n_comprehensive_sample_mislabels} sample mislabels after comprehensive"))
     
+    if (max(table(results_df$Majority_Comprehensive_Component_ID)) > 5000) {
+        file.create(file.path(project_dir, "2_comp_over_5000", file_name))
+    }
+    
     # 4. Majority search iterative ensemble
     mislabel_solver <- solve(mislabel_solver)
     curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
@@ -209,7 +220,6 @@ run_sim <- function(
 # args_list = list(n_subjects = 250, n_samples_per_subject = 6, n_swap_cats = 20, fraction_mislabel = 0.2, fraction_anchor = 0.08, fraction_ghost = 0.04, seed = 1986, output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv", runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime")
 
 params_grid <- readRDS(params_grid_file)
-failed_sims <- params_grid[NULL,]
 for (i in 1:nrow(params_grid)) {
     args_list <- as.list(params_grid[i, ])
     sim_name <- args_list$sim_name
@@ -217,18 +227,28 @@ for (i in 1:nrow(params_grid)) {
     if (file.exists(args_list$output_path)) {next}
     tryCatch(
         expr = {
-            if (!file.exists(args_list$output_path)) {
-                memory.limit(size = 4000)
-                peakRAM(do.call(run_sim, args_list))
-            }
+            withTimeout(do.call(run_sim, args_list), timeout=0.05)
         },
         error = function(e){ 
             errorMessage <- paste("Error for sim_name:", sim_name, "\n", "Error message:", conditionMessage(e))
+            if (grepl("reached elapsed time limit", errorMessage)) {
+                file_name <- file_path_sans_ext(basename(args_list$output_path))
+                project_dir <- dirname(dirname(args_list$output_path))
+                ## Create tracker to show this sim timed out
+                file.create(file.path(project_dir, "3_timeout_2hrs", file_name))
+            }
             print(errorMessage)
-            ## Assignment in global scope
-            failed_sims <<- rbind(failed_sims, params_grid[i, ])
         }
     )
 }
 # saveRDS(failed_sims, params_grid_errors_file)
+
+## For all sims
+## If over 5000 after comprehensive search, write sim name to directory "over_5000" and quit the sim
+## Try local search
+## If failed because of timeout, write sim name to directory "timeout_2hours" and quit the sim
+## If succeeded, 
+## Failures due to memory are setdiff over all sims with every outcome above
+
+
 
