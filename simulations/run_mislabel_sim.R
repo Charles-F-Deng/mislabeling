@@ -45,13 +45,13 @@ params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{ba
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 5
-    n_samples_per_subject = 8
-    n_swap_cats = 3
-    fraction_mislabel = 0.3
-    fraction_anchor = 0.0
-    fraction_ghost = 0.00
-    seed = 1990
+    n_subjects = 200
+    n_samples_per_subject = 10
+    n_swap_cats = 5
+    fraction_mislabel = 0.5
+    fraction_anchor = 0.1
+    fraction_ghost = 0.1
+    seed = 1986
     output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
     runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime"
 })

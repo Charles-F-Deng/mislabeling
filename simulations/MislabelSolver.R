@@ -18,6 +18,7 @@ EMPTY_RELABELS <- data.frame(relabel_from=character(0), relabel_to=character(0))
 VISNETWORK_SWAPCAT_SHAPES <- c("dot", "square", "triangle", "diamond", "star")
 LABEL_NOT_FOUND <- "LABELNOTFOUND"
 MAX_GENOTYPES_COMP_SEARCH <- 8
+MAX_NEIGHBORS_LOCAL_SEARCH <- 1e6
 
 setClass("MislabelSolver",
          representation(
@@ -34,6 +35,9 @@ setClass("MislabelSolver",
 
 setMethod("initialize", "MislabelSolver",
           function(.Object, sample_genotype_data, swap_cats=NULL, anchor_samples=character(0)) {
+              ## There's some randomness when it comes to breaking ties
+              set.seed(1)
+              
               ## Wrangle 'sample_genotype_data'
               sample_genotype_data <- as.data.frame(lapply(sample_genotype_data, as.character))
               .validate_sample_genotype_data(sample_genotype_data)
@@ -95,7 +99,7 @@ setMethod("plot", "MislabelSolver",
           function(x, 
                    y=NULL, 
                    unsolved=TRUE, 
-                   query_by=c("Component_ID", "Subject_ID", "Genotype_Group_ID", "Sample_ID"),
+                   query_by=c("Init_Component_ID", "Component_ID", "Subject_ID", "Genotype_Group_ID", "Sample_ID"),
                    query_val=NULL) {
               if (unsolved) {
                   relabel_data <- x@.solve_state$unsolved_relabel_data
@@ -109,18 +113,29 @@ setMethod("plot", "MislabelSolver",
               if (!is.null(query_val)) {
                   query_by <- as.character(query_by)
                   query_by <- match.arg(query_by)
-                  if (query_by == "Component_ID") {query_by <- "Init_Component_ID"}
-                  component_id <- rbind(relabel_data, ghost_data) %>% 
-                      filter(!!sym(query_by) == query_val) %>% 
-                      pull(Init_Component_ID) %>% 
-                      unique()
+                  if (query_by == "Init_Component_ID") {
+                      component_id <- rbind(relabel_data, ghost_data) %>% 
+                          filter(!!sym(query_by) == query_val) %>% 
+                          pull(Init_Component_ID) %>% 
+                          unique()
+                  } else {
+                      component_id <- rbind(relabel_data, ghost_data) %>% 
+                          filter(!!sym(query_by) == query_val) %>% 
+                          pull(Component_ID) %>% 
+                          unique()
+                  }
                   if (length(component_id) == 0) {
                       warning(glue("No samples found for 'query_by' \"{query_by}\" and 'query_val' \"{query_val}\""))
                       return()
                   }
                   component_id <- component_id[[1]]
-                  relabel_data <- relabel_data %>% filter(Init_Component_ID == component_id)
-                  ghost_data <- ghost_data %>% filter(Init_Component_ID == component_id)
+                  if (query_by == "Init_Component_ID") {
+                      relabel_data <- relabel_data %>% filter(Init_Component_ID == component_id)
+                      ghost_data <- ghost_data %>% filter(Init_Component_ID == component_id)
+                  } else {
+                      relabel_data <- relabel_data %>% filter(Component_ID == component_id)
+                      ghost_data <- ghost_data %>% filter(Component_ID == component_id)
+                  }
               }
               graph <- .generate_graph(relabel_data, graph_type = "combined", ghost_data, anchor_samples, swap_cats, populate_plotting_attributes=TRUE)
               with_seed(1, {
@@ -222,12 +237,14 @@ setGeneric("write_corrections", function(object) {
 
 setMethod("solve_majority_search", "MislabelSolver",
           function(object, unambiguous_only=FALSE) {
+              print("Starting majority search")
               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                   return(object)
               }
               
               ## 1. Update putative subjects
-              votes <- .genotype_group_vote(object, unsolved=TRUE)
+              votes <- table(object@.solve_state$unsolved_relabel_data$Genotype_Group_ID, 
+                             object@.solve_state$unsolved_relabel_data$Subject_ID)
               votes_by_genotype <- data.frame(
                   Genotype_Group_ID = rownames(votes),
                   Max_Subject_ID = colnames(votes)[apply(votes, 1, which.max)],
@@ -271,6 +288,7 @@ setMethod("solve_majority_search", "MislabelSolver",
 
 setMethod("solve_comprehensive_search", "MislabelSolver",
           function(object) {
+              print("Starting comprehensive search")
               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                   return(object)
               }
@@ -404,14 +422,14 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                               ## The weighting scheme is arbitrary right now
                               perm_score = n_samples_to_relabel + 1.5 * n_samples_to_relabel_ghost + 2 * (n_genotype_deletions + n_label_deletions)
                           ) %>% 
-                          column_to_rownames("Permutation_ID")
+                          tibble::column_to_rownames("Permutation_ID")
                       
                       permutation_stats <- permutation_stats + swap_cat_perm_stats
                   }
                   
                   permutation_stats <- permutation_stats %>%
                       as.data.frame() %>% 
-                      rownames_to_column("Permutation_ID") %>% 
+                      tibble::rownames_to_column("Permutation_ID") %>% 
                       arrange(perm_score)
                   
                   ## To find a single solution, take top row
@@ -454,64 +472,84 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
           }
 )
 
-setMethod("solve_local_search", "MislabelSolver",
-          ## TODO: disallow swapping if it goes against 2 
-          function(object, objective=c("genotype_entropy", "hamming_distance"), n_iter=1, include_ghost=FALSE) {
+# 1. Create a 2D table of Genotype_Group_ID x Subject_ID counts (2D table)
+# 2. Compute baseline scaled genotypes for each Genotype_Group (named vector)
+# 3. Find all neighbors
+# 4. Write a function that takes in 2 samples to swap, and finds the delta entropy and returns
+# 5. mapply will give the delta column
+setMethod("solve_local_search", "MislabelSolver", 
+          function(object, n_iter=1, include_ghost=FALSE, filter_concordant_vertices=FALSE) {
+              print("Starting local search")
               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                   return(object)
               }
               
-              search_objectives <- list(
-                  genotype_entropy = .objective_genotype_entropy,
-                  hamming_distance = .objective_hamming_distance
-              )
-              objective_options <- names(search_objectives)
-              objective <- as.character(objective)
-              objective <- match.arg(objective, names(search_objectives))
-              if (objective %in% objective_options) {
-                  objective_function <- search_objectives[[objective]]
-              } else {
-                  stop(glue("unrecognized value for 'objective': {objective}"))
+              calc_scaled_entropy <- function(x) {
+                  return(sum(x*log(x/sum(x)), na.rm=TRUE))
               }
               
+              unsolved_all_data <- rbind(object@.solve_state$unsolved_relabel_data,
+                                         object@.solve_state$unsolved_ghost_data)
               for (i in 1:n_iter) {
-                  print(glue("Iteration {i}:: local search with 'objective' \"{objective}\""))
-                  neighbors <- .find_neighbors(object, include_ghost) %>% 
-                      left_join(
-                          rbind(object@.solve_state$unsolved_relabel_data[, c("Sample_ID", "Component_ID")],
-                                object@.solve_state$unsolved_ghost_data[, c("Sample_ID", "Component_ID")]), 
-                          by=c("Sample_A"="Sample_ID")
-                      )
+                  print(glue("Iteration {i}:: local search, 'include_ghost'={include_ghost}, 'filter_concordant_vertices'={filter_concordant_vertices}"))
                   
+                  votes <- table(object@.solve_state$unsolved_relabel_data$Genotype_Group_ID, 
+                                 object@.solve_state$unsolved_relabel_data$Subject_ID)
+                  base_entropies <- apply(votes, MARGIN=1, calc_scaled_entropy)
+                  
+                  calc_swapped_delta_entropy <- function(swap_from_subject, swap_from_genotype,
+                                                         swap_to_subject, swap_to_genotype) {
+                      delta <- 0
+                      if (!is.na(swap_from_genotype)) {
+                          genotype_base_entropy <- base_entropies[swap_from_genotype]
+                          genotype_votes_vec <- votes[swap_from_genotype, ]
+                          genotype_votes_vec[swap_from_subject] <- genotype_votes_vec[swap_from_subject] - 1
+                          genotype_votes_vec[swap_to_subject] <- genotype_votes_vec[swap_to_subject] + 1
+                          genotype_new_entropy <- calc_scaled_entropy(genotype_votes_vec)
+                          delta <- delta + genotype_new_entropy - genotype_base_entropy
+                      }
+                      if (!is.na(swap_to_genotype)) {
+                          genotype_base_entropy <- base_entropies[swap_to_genotype]
+                          genotype_votes_vec <- votes[swap_to_genotype, ]
+                          genotype_votes_vec[swap_to_subject] <- genotype_votes_vec[swap_to_subject] - 1
+                          genotype_votes_vec[swap_from_subject] <- genotype_votes_vec[swap_from_subject] + 1
+                          genotype_new_entropy <- calc_scaled_entropy(genotype_votes_vec)
+                          delta <- delta + genotype_new_entropy - genotype_base_entropy
+                      }
+                      return(delta)
+                  }
+                  
+                  neighbors <- .find_neighbors(object, include_ghost, filter_concordant_vertices) %>% 
+                      left_join(
+                          unsolved_all_data[, c("Sample_ID", "Subject_ID", "Genotype_Group_ID")], 
+                          by=c("Sample_A"="Sample_ID")
+                      ) %>%
+                      dplyr::rename(Subject_A = Subject_ID, Genotype_Group_A = Genotype_Group_ID) %>% 
+                      left_join(
+                          unsolved_all_data[, c("Sample_ID", "Subject_ID", "Genotype_Group_ID", "Component_ID")], 
+                          by=c("Sample_B"="Sample_ID")
+                      ) %>% 
+                      dplyr::rename(Subject_B = Subject_ID, Genotype_Group_B = Genotype_Group_ID) 
+                  
+                  print(glue("{nrow(neighbors)} candidate swaps being evaluated..."))
                   all_component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
                   relabels <- data.frame(matrix(data=NA, nrow=length(all_component_ids), ncol=2, dimnames=list(c(), c("relabel_from", "relabel_to"))))
                   curr_idx <- 1
                   for (curr_component_id in all_component_ids) {
-                      cc_relabel_data <- rbind(object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == curr_component_id),
-                                               object@.solve_state$unsolved_ghost_data %>% filter(Component_ID == curr_component_id))
+                      cc_relabel_data <- unsolved_all_data %>% filter(Component_ID == curr_component_id)
                       cc_neighbors <- neighbors %>% filter(Component_ID == curr_component_id)
-                      calc_swapped_objective <- function(swap_from, swap_to) {
-                          swap_from_index <- which(cc_relabel_data$Sample_ID == swap_from)[[1]]
-                          swap_to_index <- which(cc_relabel_data$Sample_ID == swap_to)[[1]]
-                          swap_from_subject <- cc_relabel_data[swap_from_index, "Subject_ID"][[1]]
-                          swap_to_subject <- cc_relabel_data[swap_to_index, "Subject_ID"][[1]]
-                          cc_relabel_data[swap_from_index, "Sample_ID"] <- swap_to
-                          cc_relabel_data[swap_from_index, "Subject_ID"] <- swap_to_subject
-                          cc_relabel_data[swap_to_index, "Sample_ID"] <- swap_from
-                          cc_relabel_data[swap_to_index, "Subject_ID"] <- swap_from_subject
-                          new_objective <- objective_function(cc_relabel_data[!is.na(cc_relabel_data$Genotype_Group_ID), ])
-                          return(new_objective)
-                      }
                       
                       if (nrow(cc_neighbors) == 0) {next}
                       cc_neighbor_objectives <- cc_neighbors %>% 
                           mutate(
-                              base = objective_function(cc_relabel_data),
-                              objective = mapply(calc_swapped_objective, swap_from=Sample_A, swap_to=Sample_B),
-                              delta = objective - base
+                              delta = mapply(calc_swapped_delta_entropy, 
+                                                 swap_from_subject=Subject_A, 
+                                                 swap_from_genotype=Genotype_Group_A,
+                                                 swap_to_subject=Subject_B,
+                                                 swap_to_genotype=Genotype_Group_B)
                           )
                       cc_relabels <- cc_neighbor_objectives %>%
-                          filter(delta < 0, delta == min(delta)) 
+                          filter(delta > 0, delta == max(delta)) 
                       if (nrow(cc_relabels) == 0) {next}
                       cc_relabels <- cc_relabels %>% 
                           sample_n(1) %>%
@@ -520,7 +558,6 @@ setMethod("solve_local_search", "MislabelSolver",
                               relabel_to=Sample_B
                           )
                       relabels[curr_idx, c("relabel_from", "relabel_to")] <- cc_relabels
-                      
                       curr_idx <- curr_idx + 1
                   }
                   
@@ -533,107 +570,141 @@ setMethod("solve_local_search", "MislabelSolver",
           }
 )
 
-setMethod("solve_local_search_bulk", "MislabelSolver",
-          ## TODO: disallow swapping if it goes against 2 
-          function(object, objective=c("genotype_entropy", "hamming_distance"), n_iter=1, frac_per_iter=0.20, include_ghost=FALSE) {
-              if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
-                  return(object)
-              }
-              
-              search_objectives <- list(
-                  genotype_entropy = .objective_genotype_entropy,
-                  hamming_distance = .objective_hamming_distance
-              )
-              objective_options <- names(search_objectives)
-              objective <- as.character(objective)
-              objective <- match.arg(objective, names(search_objectives))
-              
-              ## Bulk local search only works for genotype_entropy
-              assert_that(objective == "genotype_entropy")
-              
-              if (objective %in% objective_options) {
-                  objective_function <- search_objectives[[objective]]
-              } else {
-                  stop(glue("unrecognized value for 'objective': {objective}"))
+# 1. Create a 2D table of Genotype_Group_ID x Subject_ID counts (2D table)
+# 2. Compute baseline scaled genotypes for each Genotype_Group (named vector)
+# 3. Find all neighbors
+# 4. Iterate through components
+# 5. If component has more than MAX_NEIGHBORS_LOCAL_SEARCH neighbors, sample down to MAX_NEIGHBORS_LOCAL_SEARCH
+# 6. mapply to give the delta column for each neighbor
+# 7. Find minimum number of mislabels in the component
+# 8. Find number of swaps to look for (n swaps fixes at most 2n mislabels, so that must be less that frac * min_mislabels_in_component)
+# 9. Iteratively find a swap, then drop all swaps that involve either of the 2 genotypes that you used
+# 10. rbind all swaps found for the component
+setMethod("solve_local_search_bulk", "MislabelSolver", 
+          function(object, n_iter=1, frac_per_iter=0.10, include_ghost=FALSE, filter_concordant_vertices=FALSE) {
+              print("Starting bulk local search")
+              calc_scaled_entropy <- function(x) {
+                  return(sum(x*log(x/sum(x)), na.rm=TRUE))
               }
               
               for (i in 1:n_iter) {
-                  print(glue("Iteration {i}:: local search with 'objective' \"{objective}\""))
-                  neighbors <- .find_neighbors(object, include_ghost) %>% 
-                      left_join(
-                          rbind(object@.solve_state$unsolved_relabel_data[, c("Sample_ID", "Component_ID")],
-                                object@.solve_state$unsolved_ghost_data[, c("Sample_ID", "Component_ID")]), 
-                          by=c("Sample_A"="Sample_ID")
-                      ) %>% 
-                      dplyr::rename(relabel_from=Sample_A, relabel_to=Sample_B)
-                  
-                  all_component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
-                  relabels_list <- list()
-                  curr_idx <- 1
-                  for (curr_component_id in all_component_ids) {
-                      cc_relabel_data <- rbind(object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == curr_component_id),
-                                               object@.solve_state$unsolved_ghost_data %>% filter(Component_ID == curr_component_id))
-                      cc_neighbors <- neighbors %>% filter(Component_ID == curr_component_id)
-                      calc_swapped_objective <- function(swap_from, swap_to) {
-                          swap_from_index <- which(cc_relabel_data$Sample_ID == swap_from)[[1]]
-                          swap_to_index <- which(cc_relabel_data$Sample_ID == swap_to)[[1]]
-                          swap_from_subject <- cc_relabel_data[swap_from_index, "Subject_ID"][[1]]
-                          swap_to_subject <- cc_relabel_data[swap_to_index, "Subject_ID"][[1]]
-                          cc_relabel_data[swap_from_index, "Sample_ID"] <- swap_to
-                          cc_relabel_data[swap_from_index, "Subject_ID"] <- swap_to_subject
-                          cc_relabel_data[swap_to_index, "Sample_ID"] <- swap_from
-                          cc_relabel_data[swap_to_index, "Subject_ID"] <- swap_from_subject
-                          new_objective <- objective_function(cc_relabel_data[!is.na(cc_relabel_data$Genotype_Group_ID), ])
-                          return(new_objective)
-                      }
-                      
-                      if (nrow(cc_neighbors) == 0) {next}
-                      cc_neighbor_objectives <- cc_neighbors %>% 
-                          mutate(
-                              base = objective_function(cc_relabel_data),
-                              objective = mapply(calc_swapped_objective, swap_from=relabel_from, swap_to=relabel_to),
-                              delta = objective - base
-                          )
-                      cc_candidate_relabels <- cc_neighbor_objectives %>%
-                          filter(delta < 0) %>%
-                          left_join(cc_relabel_data[, c("Sample_ID", "Genotype_Group_ID")], by=c("relabel_from"="Sample_ID")) %>% 
-                          left_join(cc_relabel_data[, c("Sample_ID", "Genotype_Group_ID")], by=c("relabel_to"="Sample_ID")) %>% 
-                          arrange(delta)
-                      
-                      if (nrow(cc_candidate_relabels) == 0) {next}
-                      
-                      ## Find minimum number of mislabels for the component
-                      n_min_mislabels <- sum(cc_relabel_data %>% 
-                          group_by(Genotype_Group_ID) %>% 
-                          summarize(
-                              count = n(),
-                              max_count = max(table(Subject_ID)),
-                              min_mislabels = count - max_count
-                          ) %>% pull(min_mislabels))
-                      ## Determine number of swaps to look for
-                      n_swaps_limit <- max(1, floor(n_min_mislabels * frac_per_iter * 0.5))
-                    
-                      cc_relabels <- data.frame(matrix(data=NA, nrow=n_swaps_limit, ncol=2, dimnames=list(c(), c("relabel_from", "relabel_to"))))
-                      for (j in 1:n_swaps_limit) {
-                          top_relabel <- cc_candidate_relabels %>% 
-                              head(1)
-                          cc_relabels[j, ] <- top_relabel[, c("relabel_from", "relabel_to")]
-                          from_genotype_id <- "Genotype_Group_ID.x"
-                          to_genotype_id <- "Genotype_Group_ID.x"
-                          cc_candidate_relabels <- cc_candidate_relabels %>% 
-                              filter(!(Genotype_Group_ID.x %in% c(from_genotype_id, to_genotype_id)),
-                                     !(Genotype_Group_ID.y %in% c(from_genotype_id, to_genotype_id)))
-                          if (nrow(cc_candidate_relabels) == 0) {
-                              break
-                          }
-                      }
-                      
-                      cc_relabels 
-                      relabels_list[[curr_idx]] <- cc_relabels
-                      ##relabels[curr_idx, c("relabel_from", "relabel_to")] <- cc_relabels
-                      curr_idx <- curr_idx + 1
+                  if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
+                      return(object)
                   }
                   
+                  unsolved_all_data <- rbind(object@.solve_state$unsolved_relabel_data,
+                                             object@.solve_state$unsolved_ghost_data)
+                  
+                  print(glue("Iteration {i}:: bulk local search, 'frac_per_iter'={frac_per_iter}, 'include_ghost'={include_ghost}, 'filter_concordant_vertices'={filter_concordant_vertices}"))
+                  
+                  votes <- table(object@.solve_state$unsolved_relabel_data$Genotype_Group_ID, 
+                                 object@.solve_state$unsolved_relabel_data$Subject_ID)
+                  base_entropies <- apply(votes, MARGIN=1, calc_scaled_entropy)
+                  min_mislabels <- apply(votes, MARGIN=1, \(x) sum(x) - max(x))
+                  
+                  calc_swapped_delta_entropy <- function(swap_from_subject, swap_from_genotype,
+                                                         swap_to_subject, swap_to_genotype) {
+                      delta <- 0
+                      if (!is.na(swap_from_genotype)) {
+                          genotype_base_entropy <- base_entropies[swap_from_genotype]
+                          genotype_votes_vec <- votes[swap_from_genotype, ]
+                          genotype_votes_vec[swap_from_subject] <- genotype_votes_vec[swap_from_subject] - 1
+                          genotype_votes_vec[swap_to_subject] <- genotype_votes_vec[swap_to_subject] + 1
+                          genotype_new_entropy <- calc_scaled_entropy(genotype_votes_vec)
+                          delta <- delta + genotype_new_entropy - genotype_base_entropy
+                      }
+                      if (!is.na(swap_to_genotype)) {
+                          genotype_base_entropy <- base_entropies[swap_to_genotype]
+                          genotype_votes_vec <- votes[swap_to_genotype, ]
+                          genotype_votes_vec[swap_to_subject] <- genotype_votes_vec[swap_to_subject] - 1
+                          genotype_votes_vec[swap_from_subject] <- genotype_votes_vec[swap_from_subject] + 1
+                          genotype_new_entropy <- calc_scaled_entropy(genotype_votes_vec)
+                          delta <- delta + genotype_new_entropy - genotype_base_entropy
+                      }
+                      return(delta)
+                  }
+                  
+                  neighbors <- .find_neighbors(object, include_ghost, filter_concordant_vertices) %>% 
+                      left_join(
+                          unsolved_all_data[, c("Sample_ID", "Subject_ID", "Genotype_Group_ID")], 
+                          by=c("Sample_A"="Sample_ID")
+                      ) %>%
+                      dplyr::rename(Subject_A = Subject_ID, Genotype_Group_A = Genotype_Group_ID) %>% 
+                      left_join(
+                          unsolved_all_data[, c("Sample_ID", "Subject_ID", "Genotype_Group_ID", "Component_ID")], 
+                          by=c("Sample_B"="Sample_ID")
+                      ) %>% 
+                      dplyr::rename(Subject_B = Subject_ID, Genotype_Group_B = Genotype_Group_ID) 
+                  
+                  print(glue("{nrow(neighbors)} total neighbors"))
+                  
+                  all_component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
+                  relabels_list <- vector("list", length=length(all_component_ids))
+                  curr_idx <- 1
+                  for (curr_component_id in all_component_ids) {
+                      cc_relabel_data <- unsolved_all_data %>% filter(Component_ID == curr_component_id)
+                      cc_neighbors <- neighbors %>% filter(Component_ID == curr_component_id)
+                      cc_genotypes <- unique(cc_relabel_data$Genotype_Group_ID)
+                      cc_genotypes <- cc_genotypes[!is.na(cc_genotypes)]
+                      
+                      if (nrow(cc_neighbors) == 0) {next}
+                      
+                      ## If you have too many neighbors to evaluate, downsample them
+                      ## TODO: adjust min_mislabels based on how much it was downsampled
+                      if (nrow(cc_neighbors) > MAX_NEIGHBORS_LOCAL_SEARCH) {
+                          cc_neighbors <- cc_neighbors %>% sample_n(MAX_NEIGHBORS_LOCAL_SEARCH)
+                      }
+                      
+                      cc_neighbor_objectives <- cc_neighbors %>% 
+                          mutate(
+                              delta = mapply(calc_swapped_delta_entropy, 
+                                             swap_from_subject=Subject_A, 
+                                             swap_from_genotype=Genotype_Group_A,
+                                             swap_to_subject=Subject_B,
+                                             swap_to_genotype=Genotype_Group_B)
+                          )
+                      
+                      ## Find minimum number of mislabeled samples in the component
+                      n_min_mislabels <- sum(min_mislabels[cc_genotypes])
+                      
+                      cc_candidate_neighbors <- cc_neighbor_objectives %>% 
+                          filter(delta > 0) %>% 
+                          arrange(desc(delta))
+    
+                      ## Determine maximum number of swaps to look for 
+                      ## If n_min_mislabels < 50, just make it a normal local search
+                      n_swaps_limit <- max(1, floor(n_min_mislabels * frac_per_iter * 0.5))
+                      if (n_min_mislabels <= 50) {
+                          n_swaps_limit <- 1
+                      }
+                      cc_candidate_neighbors <- cc_candidate_neighbors %>% head(n_swaps_limit)
+                      n_candidates <- nrow(cc_candidate_neighbors)
+                     
+                      if (n_candidates == 0) {next}
+                      
+                      print(glue("{n_min_mislabels} minimum mislabels in {curr_component_id}, searching through {n_candidates} candidate swaps"))
+                      
+                      cc_relabels_list <- vector("list", n_candidates)
+                      for (j in 1:n_candidates) {
+                          best_neighbor <- cc_candidate_neighbors[1, ]
+                          best_neighbor_genotypes <- c(best_neighbor$Genotype_Group_A, best_neighbor$Genotype_Group_B)
+                          cc_relabels_list[[j]] <- data.frame(relabel_from=best_neighbor$Sample_A, 
+                                                            relabel_to=best_neighbor$Sample_B)
+                          cc_candidate_neighbors <- cc_candidate_neighbors %>% 
+                              filter(
+                                  !(Genotype_Group_A %in% best_neighbor_genotypes),
+                                  !(Genotype_Group_B %in% best_neighbor_genotypes)
+                              )
+                          n_candidates <- nrow(cc_candidate_neighbors)
+                          if (n_candidates == 0) {break}
+                          
+                      }
+                      cc_relabels <- do.call(rbind, cc_relabels_list) %>% 
+                          filter(complete.cases(.))
+                      print(glue("Found {nrow(cc_relabels)} swaps for {curr_component_id}"))
+                      relabels_list[[curr_idx]] <- cc_relabels
+                      curr_idx <- curr_idx + 1
+                  }
                   relabels <- do.call(rbind, relabels_list)
                   relabels <- rbind(relabels, data.frame(relabel_from=relabels$relabel_to, relabel_to=relabels$relabel_from))
                   object <- .relabel_samples(object, relabels)
@@ -646,31 +717,28 @@ setMethod("solve_local_search_bulk", "MislabelSolver",
 setMethod("solve", "MislabelSolver",
           function(object) {
               
-              start_time <- Sys.time()
-              max_duration <- 120
-              
               while (TRUE) {
                   if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                       break
                   }
-                  prev_solve_state <- object@.solve_state$unsolved_relabel_data
+                  prev_relabel_data <- object@.solve_state$unsolved_relabel_data
                   
                   object <- solve_comprehensive_search(object)
                   object <- solve_majority_search(object)
                   object <- solve_comprehensive_search(object)
                   
-                  local_search_solve_state <- object@.solve_state$unsolved_relabel_data
-                  object <- solve_local_search(object, n_iter=1)
+                  comp_relabel_data <- object@.solve_state$unsolved_relabel_data
+                  object <- solve_local_search_bulk(object, n_iter=1, frac_per_iter=0.10, include_ghost=TRUE, filter_concordant_vertices=TRUE)
                   
-                  ## If current solve state is the same as previous, try allowing ghost swaps in local search
-                  if (nrow(local_search_solve_state) == nrow(object@.solve_state$unsolved_relabel_data)) {
-                      if (identical(local_search_solve_state, object@.solve_state$unsolved_relabel_data)) {
-                          object <- solve_local_search(object, n_iter=1, include_ghost=TRUE)
+                  ## If local search found no swaps, try allowing concordant vertices
+                  if (nrow(comp_relabel_data) == nrow(object@.solve_state$unsolved_relabel_data)) {
+                      if (identical(comp_relabel_data, object@.solve_state$unsolved_relabel_data)) {
+                          object <- solve_local_search_bulk(object, n_iter=1, frac_per_iter=0.10, include_ghost=TRUE, filter_concordant_vertices=FALSE)
                       }
                   }
                   
-                  if (nrow(prev_solve_state) == nrow(object@.solve_state$unsolved_relabel_data)) {
-                      if (identical(prev_solve_state, object@.solve_state$unsolved_relabel_data)) {
+                  if (nrow(prev_relabel_data) == nrow(object@.solve_state$unsolved_relabel_data)) {
+                      if (identical(prev_relabel_data, object@.solve_state$unsolved_relabel_data)) {
                           break
                       }
                   }
@@ -925,6 +993,7 @@ setMethod("write_corrections", "MislabelSolver",
     
     solved_components <- component_data %>% filter(Solved) %>% pull(Component_ID)
     
+    component_data <- component_data %>% filter(!Solved)
     unsolved_relabel_data <- unsolved_relabel_data %>% 
         mutate(Solved = Component_ID %in% solved_components)
     unsolved_ghost_data <- unsolved_ghost_data %>% 
@@ -932,7 +1001,6 @@ setMethod("write_corrections", "MislabelSolver",
     
     ## 3. Re-rank Component_ID(s) in order of size (so that Component1 is the largest unsolved component)
     n_components <- nrow(component_data)
-    set.seed(1)
     component_data <- component_data %>% 
         arrange(Solved, desc(n_Sample_ID)) %>% 
         mutate(
@@ -1108,8 +1176,6 @@ setMethod("write_corrections", "MislabelSolver",
     all_ghost_labels <- character(0)
     all_unknown_labels <- character(0)
     
-    set.seed(1)
-    
     for (i in 1:nrow(mislabeled_genotype_swapcats)) {
         swap_cat_id <- mislabeled_genotype_swapcats[i, "SwapCat_ID"]
         genotype_group_id <- mislabeled_genotype_swapcats[i, "Genotype_Group_ID"]
@@ -1216,22 +1282,6 @@ setMethod("write_corrections", "MislabelSolver",
     }
     
     return(relabels)
-}
-
-.genotype_group_vote <- function(object, unsolved=TRUE) {
-    if (unsolved) {
-        relabel_data <- object@.solve_state$unsolved_relabel_data
-    } else {
-        relabel_data <- object@.solve_state$relabel_data
-    }
-    votes <- relabel_data %>% 
-        group_by(Subject_ID, Genotype_Group_ID) %>% 
-        summarize(n=n(), .groups='drop') %>% 
-        pivot_wider(names_from=Subject_ID, values_from=n) %>% 
-        mutate_all(~ifelse(is.na(.), 0, .)) %>% 
-        tibble::column_to_rownames("Genotype_Group_ID") %>% 
-        as.matrix()
-    return(votes)
 }
 
 .find_neighbors <- function(object, include_ghost=FALSE, filter_concordant_vertices=FALSE) {
@@ -1709,4 +1759,213 @@ load_test_case <- function(test_name) {
 # my_mislabel_solver <- load_test_case("1-4C-1G"); object <- my_mislabel_solver
 # my_mislabel_solver <- load_test_case("example"); object <- my_mislabel_solver
 # my_mislabel_solver <- load_test_case("2G"); object <- my_mislabel_solver
+
+
+# setMethod("solve_local_search_bulk", "MislabelSolver",
+#           function(object, objective=c("genotype_entropy", "hamming_distance"), n_iter=1, frac_per_iter=0.20, include_ghost=FALSE) {
+#               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
+#                   return(object)
+#               }
+# 
+#               search_objectives <- list(
+#                   genotype_entropy = .objective_genotype_entropy,
+#                   hamming_distance = .objective_hamming_distance
+#               )
+#               objective_options <- names(search_objectives)
+#               objective <- as.character(objective)
+#               objective <- match.arg(objective, names(search_objectives))
+# 
+#               ## Bulk local search only works for genotype_entropy
+#               assert_that(objective == "genotype_entropy")
+# 
+#               if (objective %in% objective_options) {
+#                   objective_function <- search_objectives[[objective]]
+#               } else {
+#                   stop(glue("unrecognized value for 'objective': {objective}"))
+#               }
+# 
+#               for (i in 1:n_iter) {
+#                   print(glue("Iteration {i}:: local search with 'objective' \"{objective}\""))
+#                   neighbors <- .find_neighbors(object, include_ghost) %>%
+#                       left_join(
+#                           rbind(object@.solve_state$unsolved_relabel_data[, c("Sample_ID", "Component_ID")],
+#                                 object@.solve_state$unsolved_ghost_data[, c("Sample_ID", "Component_ID")]),
+#                           by=c("Sample_A"="Sample_ID")
+#                       ) %>%
+#                       dplyr::rename(relabel_from=Sample_A, relabel_to=Sample_B)
+#                   print(glue("{nrow(neighbors)} candidate swaps being evaluated..."))
+#                   all_component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
+#                   relabels_list <- list()
+#                   curr_idx <- 1
+#                   for (curr_component_id in all_component_ids) {
+#                       cc_relabel_data <- rbind(object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == curr_component_id),
+#                                                object@.solve_state$unsolved_ghost_data %>% filter(Component_ID == curr_component_id))
+#                       cc_neighbors <- neighbors %>% filter(Component_ID == curr_component_id)
+#                       calc_swapped_objective <- function(swap_from, swap_to) {
+#                           swap_from_index <- which(cc_relabel_data$Sample_ID == swap_from)[[1]]
+#                           swap_to_index <- which(cc_relabel_data$Sample_ID == swap_to)[[1]]
+#                           swap_from_subject <- cc_relabel_data[swap_from_index, "Subject_ID"][[1]]
+#                           swap_to_subject <- cc_relabel_data[swap_to_index, "Subject_ID"][[1]]
+#                           cc_relabel_data[swap_from_index, "Sample_ID"] <- swap_to
+#                           cc_relabel_data[swap_from_index, "Subject_ID"] <- swap_to_subject
+#                           cc_relabel_data[swap_to_index, "Sample_ID"] <- swap_from
+#                           cc_relabel_data[swap_to_index, "Subject_ID"] <- swap_from_subject
+#                           new_objective <- objective_function(cc_relabel_data[!is.na(cc_relabel_data$Genotype_Group_ID), ])
+#                           return(new_objective)
+#                       }
+# 
+#                       if (nrow(cc_neighbors) == 0) {next}
+#                       cc_neighbor_objectives <- cc_neighbors %>%
+#                           mutate(
+#                               base = objective_function(cc_relabel_data),
+#                               objective = mapply(calc_swapped_objective, swap_from=relabel_from, swap_to=relabel_to),
+#                               delta = objective - base
+#                           )
+#                       cc_candidate_relabels <- cc_neighbor_objectives %>%
+#                           filter(delta < 0) %>%
+#                           left_join(cc_relabel_data[, c("Sample_ID", "Genotype_Group_ID")], by=c("relabel_from"="Sample_ID")) %>%
+#                           left_join(cc_relabel_data[, c("Sample_ID", "Genotype_Group_ID")], by=c("relabel_to"="Sample_ID")) %>%
+#                           arrange(delta)
+# 
+#                       if (nrow(cc_candidate_relabels) == 0) {next}
+# 
+#                       ## Find minimum number of mislabels for the component
+#                       n_min_mislabels <- sum(cc_relabel_data %>%
+#                                                  group_by(Genotype_Group_ID) %>%
+#                                                  summarize(
+#                                                      count = n(),
+#                                                      max_count = max(table(Subject_ID)),
+#                                                      min_mislabels = count - max_count
+#                                                  ) %>% pull(min_mislabels))
+#                       ## Determine number of swaps to look for
+#                       n_swaps_limit <- max(1, floor(n_min_mislabels * frac_per_iter * 0.5))
+# 
+#                       cc_relabels <- data.frame(matrix(data=NA, nrow=n_swaps_limit, ncol=2, dimnames=list(c(), c("relabel_from", "relabel_to"))))
+#                       for (j in 1:n_swaps_limit) {
+#                           top_relabel <- cc_candidate_relabels %>%
+#                               head(1)
+#                           cc_relabels[j, ] <- top_relabel[, c("relabel_from", "relabel_to")]
+#                           from_genotype_id <- "Genotype_Group_ID.x"
+#                           to_genotype_id <- "Genotype_Group_ID.x"
+#                           cc_candidate_relabels <- cc_candidate_relabels %>%
+#                               filter(!(Genotype_Group_ID.x %in% c(from_genotype_id, to_genotype_id)),
+#                                      !(Genotype_Group_ID.y %in% c(from_genotype_id, to_genotype_id)))
+#                           if (nrow(cc_candidate_relabels) == 0) {
+#                               break
+#                           }
+#                       }
+# 
+#                       cc_relabels
+#                       relabels_list[[curr_idx]] <- cc_relabels
+#                       ##relabels[curr_idx, c("relabel_from", "relabel_to")] <- cc_relabels
+#                       curr_idx <- curr_idx + 1
+#                   }
+# 
+#                   relabels <- do.call(rbind, relabels_list)
+#                   relabels <- rbind(relabels, data.frame(relabel_from=relabels$relabel_to, relabel_to=relabels$relabel_from))
+#                   object <- .relabel_samples(object, relabels)
+#               }
+# 
+#               return(object)
+#           }
+# )
+
+# .genotype_group_vote <- function(object, unsolved=TRUE) {
+#     if (unsolved) {
+#         relabel_data <- object@.solve_state$unsolved_relabel_data
+#     } else {
+#         relabel_data <- object@.solve_state$relabel_data
+#     }
+#     votes <- relabel_data %>% 
+#         group_by(Subject_ID, Genotype_Group_ID) %>% 
+#         summarize(n=n(), .groups='drop') %>% 
+#         pivot_wider(names_from=Subject_ID, values_from=n) %>% 
+#         mutate_all(~ifelse(is.na(.), 0, .)) %>% 
+#         tibble::column_to_rownames("Genotype_Group_ID") %>% 
+#         as.matrix()
+#     return(votes)
+# }
+# setMethod("solve_local_search", "MislabelSolver", 
+#           function(object, objective=c("genotype_entropy", "hamming_distance"), 
+#                    n_iter=1, 
+#                    include_ghost=FALSE, 
+#                    filter_concordant_vertices=FALSE) {
+#               print("Starting local search")
+#               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
+#                   return(object)
+#               }
+#               
+#               search_objectives <- list(
+#                   genotype_entropy = .objective_genotype_entropy,
+#                   hamming_distance = .objective_hamming_distance
+#               )
+#               objective_options <- names(search_objectives)
+#               objective <- as.character(objective)
+#               objective <- match.arg(objective, names(search_objectives))
+#               if (objective %in% objective_options) {
+#                   objective_function <- search_objectives[[objective]]
+#               } else {
+#                   stop(glue("unrecognized value for 'objective': {objective}"))
+#               }
+#               
+#               for (i in 1:n_iter) {
+#                   print(glue("Iteration {i}:: local search with 'objective' \"{objective}\", 'include_ghost'={include_ghost},
+#                              'filter_concordant_vertices'={filter_concordant_vertices}"))
+#                   neighbors <- .find_neighbors(object, include_ghost, filter_concordant_vertices) %>% 
+#                       left_join(
+#                           rbind(object@.solve_state$unsolved_relabel_data[, c("Sample_ID", "Component_ID")],
+#                                 object@.solve_state$unsolved_ghost_data[, c("Sample_ID", "Component_ID")]), 
+#                           by=c("Sample_A"="Sample_ID")
+#                       )
+#                   print(glue("{nrow(neighbors)} candidate swaps being evaluated..."))
+#                   all_component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
+#                   relabels <- data.frame(matrix(data=NA, nrow=length(all_component_ids), ncol=2, dimnames=list(c(), c("relabel_from", "relabel_to"))))
+#                   curr_idx <- 1
+#                   for (curr_component_id in all_component_ids) {
+#                       cc_relabel_data <- rbind(object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == curr_component_id),
+#                                                object@.solve_state$unsolved_ghost_data %>% filter(Component_ID == curr_component_id))
+#                       cc_neighbors <- neighbors %>% filter(Component_ID == curr_component_id)
+#                       calc_swapped_objective <- function(swap_from, swap_to) {
+#                           swap_from_index <- which(cc_relabel_data$Sample_ID == swap_from)[[1]]
+#                           swap_to_index <- which(cc_relabel_data$Sample_ID == swap_to)[[1]]
+#                           swap_from_subject <- cc_relabel_data[swap_from_index, "Subject_ID"][[1]]
+#                           swap_to_subject <- cc_relabel_data[swap_to_index, "Subject_ID"][[1]]
+#                           cc_relabel_data[swap_from_index, "Sample_ID"] <- swap_to
+#                           cc_relabel_data[swap_from_index, "Subject_ID"] <- swap_to_subject
+#                           cc_relabel_data[swap_to_index, "Sample_ID"] <- swap_from
+#                           cc_relabel_data[swap_to_index, "Subject_ID"] <- swap_from_subject
+#                           new_objective <- objective_function(cc_relabel_data[!is.na(cc_relabel_data$Genotype_Group_ID), ])
+#                           return(new_objective)
+#                       }
+#                       
+#                       if (nrow(cc_neighbors) == 0) {next}
+#                       cc_neighbor_objectives <- cc_neighbors %>% 
+#                           mutate(
+#                               base = objective_function(cc_relabel_data),
+#                               objective = mapply(calc_swapped_objective, swap_from=Sample_A, swap_to=Sample_B),
+#                               delta = objective - base
+#                           )
+#                       cc_relabels <- cc_neighbor_objectives %>%
+#                           filter(delta < 0, delta == min(delta)) 
+#                       if (nrow(cc_relabels) == 0) {next}
+#                       cc_relabels <- cc_relabels %>% 
+#                           sample_n(1) %>%
+#                           transmute(
+#                               relabel_from=Sample_A,
+#                               relabel_to=Sample_B
+#                           )
+#                       relabels[curr_idx, c("relabel_from", "relabel_to")] <- cc_relabels
+#                       
+#                       curr_idx <- curr_idx + 1
+#                   }
+#                   
+#                   relabels <- relabels[!is.na(relabels[, 1]) & !is.na(relabels[, 2]), ]
+#                   relabels <- rbind(relabels, data.frame(relabel_from=relabels$relabel_to, relabel_to=relabels$relabel_from))
+#                   object <- .relabel_samples(object, relabels)
+#               }
+#               
+#               return(object)
+#           }
+# )
+
 
