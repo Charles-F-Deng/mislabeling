@@ -728,12 +728,12 @@ setMethod("solve", "MislabelSolver",
                   object <- solve_comprehensive_search(object)
                   
                   comp_relabel_data <- object@.solve_state$unsolved_relabel_data
-                  object <- solve_local_search(object, n_iter=1, frac_per_iter=0.10, include_ghost=TRUE, filter_concordant_vertices=TRUE)
+                  object <- solve_local_search(object, n_iter=1, include_ghost=TRUE, filter_concordant_vertices=TRUE)
                   
                   ## If local search found no swaps, try allowing concordant vertices
                   if (nrow(comp_relabel_data) == nrow(object@.solve_state$unsolved_relabel_data)) {
                       if (identical(comp_relabel_data, object@.solve_state$unsolved_relabel_data)) {
-                          object <- solve_local_search(object, n_iter=1, frac_per_iter=0.10, include_ghost=TRUE, filter_concordant_vertices=FALSE)
+                          object <- solve_local_search(object, n_iter=1, include_ghost=TRUE, filter_concordant_vertices=FALSE)
                       }
                   }
                   
