@@ -187,23 +187,24 @@ run_sim <- function(
     
     if (max(table(results_df$Majority_Comprehensive_Component_ID)) > 5000) {
         file.create(file.path(output_dir, "02_comp_over_5000", sim_name))
-    }
-    
-    # 4. Majority search iterative ensemble
-    mislabel_solver <- solve(mislabel_solver)
-    curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
-        select(Init_Sample_ID, Sample_ID, Subject_ID, Solved, Component_ID) %>% 
-        rename(Ensemble_Component_ID = Component_ID,
-               Sample_ID_ensemble = Sample_ID,
-               Subject_ID_ensemble = Subject_ID,
-               Solved_ensemble = Solved)
-    results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
-    print(glue("Ensemble run for {sim_name}"))
-    
-    n_ensemble_subject_mislabels <- sum((results_df$Subject_ID_ensemble != results_df$True_Subject_ID) & !is.na(results_df$Genotype_Group_ID))
-    n_ensemble_sample_mislabels <- sum((results_df$Sample_ID_ensemble != results_df$True_Sample_ID) & !is.na(results_df$Genotype_Group_ID))
-    print(glue("{n_ensemble_subject_mislabels} subject mislabels after ensemble"))
-    print(glue("{n_ensemble_sample_mislabels} sample mislabels after ensemble"))
+        print(glue("Skipping ensemble for {sim_name}"))
+    } else {
+        # 4. Majority search iterative ensemble
+        mislabel_solver <- solve(mislabel_solver)
+        curr_results_df <- mislabel_solver@.solve_state$relabel_data %>% 
+            select(Init_Sample_ID, Sample_ID, Subject_ID, Solved, Component_ID) %>% 
+            rename(Ensemble_Component_ID = Component_ID,
+                   Sample_ID_ensemble = Sample_ID,
+                   Subject_ID_ensemble = Subject_ID,
+                   Solved_ensemble = Solved)
+        results_df <- results_df %>% full_join(curr_results_df, by="Init_Sample_ID")
+        print(glue("Ensemble run for {sim_name}"))
+        
+        n_ensemble_subject_mislabels <- sum((results_df$Subject_ID_ensemble != results_df$True_Subject_ID) & !is.na(results_df$Genotype_Group_ID))
+        n_ensemble_sample_mislabels <- sum((results_df$Sample_ID_ensemble != results_df$True_Sample_ID) & !is.na(results_df$Genotype_Group_ID))
+        print(glue("{n_ensemble_subject_mislabels} subject mislabels after ensemble"))
+        print(glue("{n_ensemble_sample_mislabels} sample mislabels after ensemble"))
+    } 
     
     end_time = Sys.time()
     
