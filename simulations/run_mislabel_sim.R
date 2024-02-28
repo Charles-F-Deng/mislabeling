@@ -31,18 +31,16 @@ library(tools)
 library(peakRAM)
 
 script_dir <- this.dir()
-#script_dir <- "/sc/arion/projects/mscic1/results/Charles/mislabeling_simulations/mislabeling/simulations"
 source(file.path(script_dir, "sim_mislabeled_dataset.R"))
 source(file.path(script_dir, "MislabelSolver.R"))
 
 cmd_args <- commandArgs(trailingOnly = TRUE)
 params_grid_file <- cmd_args[1]
-params_grid_errors_file <- file.path(dirname(params_grid_file), glue("failed_{basename(params_grid_file)}"))
 
 # Column of relabels for each incremental improvement
 # 1. unambiguous majority
 # 2. majority with cycle detection
-# 3. majority with comprehensive
+# 3. majority with comprehensivesim_name
 # 4. iterative ensemble with local search
 
 local({
@@ -53,8 +51,17 @@ local({
     fraction_anchor = 0.1
     fraction_ghost = 0.1
     seed = 1986
-    output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv"
-    runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime"
+    output_dir = "/Users/charlesdeng/Workspace/mislabeling/simulations"
+    sim_name = "testtest"
+    args_list = list(n_subjects = n_subjects, 
+                     n_samples_per_subject = n_samples_per_subject, 
+                     n_swap_cats = n_swap_cats, 
+                     fraction_mislabel = fraction_mislabel, 
+                     fraction_anchor = fraction_anchor, 
+                     fraction_ghost = fraction_ghost, 
+                     seed = seed, 
+                     output_dir = output_dir, 
+                     sim_name = sim_name)
 })
 
 ## all is 5352.4
@@ -75,17 +82,13 @@ run_sim <- function(
         fraction_anchor, 
         fraction_ghost,
         seed,
-        output_path,
-        runtime_output_path=NULL) {
-    
-    file_name <- file_path_sans_ext(basename(output_path))
-    project_dir <- dirname(dirname(output_path))
+        output_dir,
+        sim_name) {
     
     ## Create tracker to show we tried this sim
-    file.create(file.path(project_dir, "1_tried", file_name))
+    file.create(file.path(output_dir, "01_tried", sim_name))
     
-    sim_name <- glue("{n_subjects}-{n_samples_per_subject}-{n_swap_cats}-{fraction_mislabel}-{fraction_anchor}-{fraction_ghost}-{seed}")
-    print(glue("Running simulation for {sim_name}"))
+    print(glue("Running simulation {sim_name}"))
     
     n_subjects_per_group <- as.integer(n_subjects/2)
     n_samples_per_group <- n_subjects_per_group * n_samples_per_subject
@@ -182,7 +185,7 @@ run_sim <- function(
     print(glue("{n_comprehensive_sample_mislabels} sample mislabels after comprehensive"))
     
     if (max(table(results_df$Majority_Comprehensive_Component_ID)) > 5000) {
-        file.create(file.path(project_dir, "2_comp_over_5000", file_name))
+        file.create(file.path(output_dir, "02_comp_over_5000", sim_name))
     }
     
     # 4. Majority search iterative ensemble
@@ -203,45 +206,15 @@ run_sim <- function(
     
     end_time = Sys.time()
     
-    print(glue("Writing output to {output_path}"))
+    run_time <- end_time - start_time
+    writeLines(as.character(run_time), file.path(output_dir, "04_runtimes", sim_name))
+    
+    output_path <- file.path(output_dir, "05_solve_results", paste0(sim_name, ".csv"))
     write.csv(results_df, output_path)
-    if (!(is.null(runtime_output_path))) {
-        print(glue("Writing runtime to {runtime_output_path}"))
-        run_time <- end_time - start_time
-        writeLines(as.character(run_time), runtime_output_path)
-    }
 
     print(glue("Job complete for {sim_name}"))
     return(results_df)
 }
-
-# test <- run_sim(n_subjects, n_samples_per_subject, n_swap_cats,fraction_mislabel, fraction_anchor, fraction_ghost, seed, output_path, runtime_output_path=NULL)
-
-# args_list = list(n_subjects = 250, n_samples_per_subject = 6, n_swap_cats = 20, fraction_mislabel = 0.2, fraction_anchor = 0.08, fraction_ghost = 0.04, seed = 1986, output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest.csv", runtime_output_path = "/Users/charlesdeng/Workspace/mislabeling/simulations/testtest_runtime")
-
-params_grid <- readRDS(params_grid_file)
-for (i in 1:nrow(params_grid)) {
-    args_list <- as.list(params_grid[i, ])
-    sim_name <- args_list$sim_name
-    args_list <- args_list[!(names(args_list) %in% c("sim_name", "grid_batch_id"))]
-    if (file.exists(args_list$output_path)) {next}
-    tryCatch(
-        expr = {
-            withTimeout(do.call(run_sim, args_list), timeout=0.05)
-        },
-        error = function(e){ 
-            errorMessage <- paste("Error for sim_name:", sim_name, "\n", "Error message:", conditionMessage(e))
-            if (grepl("reached elapsed time limit", errorMessage)) {
-                file_name <- file_path_sans_ext(basename(args_list$output_path))
-                project_dir <- dirname(dirname(args_list$output_path))
-                ## Create tracker to show this sim timed out
-                file.create(file.path(project_dir, "3_timeout_2hrs", file_name))
-            }
-            print(errorMessage)
-        }
-    )
-}
-# saveRDS(failed_sims, params_grid_errors_file)
 
 ## For all sims
 ## If over 5000 after comprehensive search, write sim name to directory "over_5000" and quit the sim
@@ -250,5 +223,24 @@ for (i in 1:nrow(params_grid)) {
 ## If succeeded, 
 ## Failures due to memory are setdiff over all sims with every outcome above
 
+params_grid <- readRDS(params_grid_file)
+for (i in 1:nrow(params_grid)) {
+    args_list <- as.list(params_grid[i, ])
+    sim_name <- args_list$sim_name
+    if (file.exists(file.path(args_list$output_dir, "01_tried", sim_name))) {next}
+    tryCatch(
+        expr = {
+            withTimeout(do.call(run_sim, args_list), timeout=2 * 60 * 60)
+        },
+        error = function(e){ 
+            errorMessage <- paste("Error for sim_name:", sim_name, "\n", "Error message:", conditionMessage(e))
+            if (grepl("reached elapsed time limit", errorMessage)) {
+                ## Create tracker to show this sim timed out
+                file.create(file.path(args_list$output_dir, "03_timeout_2hrs", sim_name))
+            }
+            print(errorMessage)
+        }
+    )
+}
 
 
