@@ -177,7 +177,7 @@ setMethod("plot_corrections", "MislabelSolver",
                   relabel_data <- relabel_data %>% filter(Init_Component_ID == component_id)
               }
               graph <- .generate_corrections_graph(relabel_data)
-                  #graph <- .generate_corrections_graph(relabel_data, swap_cats, populate_plotting_attributes=TRUE)
+              #graph <- .generate_corrections_graph(relabel_data, swap_cats, populate_plotting_attributes=TRUE)
               with_seed(1, visIgraph(graph, start=l_drl))
               with_seed(1, visIgraph(graph, layout="layout_nicely"))
           }
@@ -543,10 +543,10 @@ setMethod("solve_local_search", "MislabelSolver",
                       cc_neighbor_objectives <- cc_neighbors %>% 
                           mutate(
                               delta = mapply(calc_swapped_delta_entropy, 
-                                                 swap_from_subject=Subject_A, 
-                                                 swap_from_genotype=Genotype_Group_A,
-                                                 swap_to_subject=Subject_B,
-                                                 swap_to_genotype=Genotype_Group_B)
+                                             swap_from_subject=Subject_A, 
+                                             swap_from_genotype=Genotype_Group_A,
+                                             swap_to_subject=Subject_B,
+                                             swap_to_genotype=Genotype_Group_B)
                           )
                       cc_relabels <- cc_neighbor_objectives %>%
                           filter(delta > 0, delta == max(delta)) 
@@ -670,7 +670,7 @@ setMethod("solve_local_search_bulk", "MislabelSolver",
                       cc_candidate_neighbors <- cc_neighbor_objectives %>% 
                           filter(delta > 0) %>% 
                           arrange(desc(delta))
-    
+                      
                       ## Determine maximum number of swaps to look for 
                       ## If n_min_mislabels < 50, just make it a normal local search
                       n_swaps_limit <- max(1, floor(n_min_mislabels * frac_per_iter * 0.5))
@@ -679,7 +679,7 @@ setMethod("solve_local_search_bulk", "MislabelSolver",
                       }
                       cc_candidate_neighbors <- cc_candidate_neighbors %>% head(n_swaps_limit)
                       n_candidates <- nrow(cc_candidate_neighbors)
-                     
+                      
                       if (n_candidates == 0) {next}
                       
                       print(glue("{n_min_mislabels} minimum mislabels in {curr_component_id}, searching through {n_candidates} candidate swaps"))
@@ -689,7 +689,7 @@ setMethod("solve_local_search_bulk", "MislabelSolver",
                           best_neighbor <- cc_candidate_neighbors[1, ]
                           best_neighbor_genotypes <- c(best_neighbor$Genotype_Group_A, best_neighbor$Genotype_Group_B)
                           cc_relabels_list[[j]] <- data.frame(relabel_from=best_neighbor$Sample_A, 
-                                                            relabel_to=best_neighbor$Sample_B)
+                                                              relabel_to=best_neighbor$Sample_B)
                           cc_candidate_neighbors <- cc_candidate_neighbors %>% 
                               filter(
                                   !(Genotype_Group_A %in% best_neighbor_genotypes),
@@ -736,12 +736,17 @@ setMethod("solve", "MislabelSolver",
                           object <- solve_local_search(object, n_iter=1, include_ghost=TRUE, filter_concordant_vertices=FALSE)
                       }
                   }
+                  rm(comp_relabel_data)
                   
                   if (nrow(prev_relabel_data) == nrow(object@.solve_state$unsolved_relabel_data)) {
                       if (identical(prev_relabel_data, object@.solve_state$unsolved_relabel_data)) {
                           break
                       }
                   }
+                  rm(prev_relabel_data)
+                  
+                  object <- qdeserailze(qserialize(object))
+                  gc()
               }
               
               return(object)
@@ -1419,7 +1424,7 @@ setMethod("write_corrections", "MislabelSolver",
         length(duplicated_samples) == 0,
         msg = glue("'swap_cats' has non-unique Sample_ID(s) {paste(duplicated_samples, collapse=\", \")}")
     )
-
+    
     missing_samples <- setdiff(sample_genotype_data$Sample_ID, swap_cats$Sample_ID)
     assert_that(
         length(missing_samples) == 0,
@@ -1749,7 +1754,7 @@ load_test_case <- function(test_name) {
     my_mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats)
     return(my_mislabel_solver)
 }
- 
+
 #my_mislabel_solver <- new("MislabelSolver", sample_genotype_data, swap_cats, anchor_samples); object <- my_mislabel_solver
 #my_mislabel_solver <- load_test_case("Example"); object <- my_mislabel_solver
 #my_mislabel_solver <- load_test_case("1-3C-2G-unswapped"); object <- my_mislabel_solver

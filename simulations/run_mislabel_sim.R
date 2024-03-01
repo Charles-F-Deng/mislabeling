@@ -243,6 +243,7 @@ for (i in 1:nrow(params_grid)) {
             print(errorMessage)
         }
     )
+    gc()
 }
 
 
