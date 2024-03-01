@@ -28,6 +28,7 @@ column_to_rownames <- tibble::column_to_rownames
 rownames_to_column <- tibble::rownames_to_column
 library(gtools)
 library(tools)
+library(qs)
 library(peakRAM)
 library(R.utils)
 
