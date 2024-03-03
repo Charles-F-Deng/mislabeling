@@ -745,7 +745,7 @@ setMethod("solve", "MislabelSolver",
                   }
                   rm(prev_relabel_data)
                   
-                  object <- qdeserailze(qserialize(object))
+                  object <- qdeserialze(qserialize(object))
                   gc()
               }
               
