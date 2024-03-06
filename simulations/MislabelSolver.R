@@ -13,6 +13,7 @@
 # 3. Memory optimization by avoiding making the distances matrix
 # 4. Time optimization by doing a bulk search for local search (done but needs testing and already ran sims without it)
 # 5. Majority search doesn't currently allow for ghosts or deletions
+# 6. Don't run set.seed(1), switch everything to with_seed
 
 EMPTY_RELABELS <- data.frame(relabel_from=character(0), relabel_to=character(0))
 VISNETWORK_SWAPCAT_SHAPES <- c("dot", "square", "triangle", "diamond", "star")
@@ -183,34 +184,6 @@ setMethod("plot_corrections", "MislabelSolver",
           }
 )
 
-# .generate_corrections_graph <- function(relabel_data, swap_cats) {
-#     applied_relabels <- relabel_data %>% 
-#         filter(Init_Sample_ID != Sample_ID) %>% 
-#         select(
-#             Init_Sample_ID,
-#             Sample_ID
-#         ) %>% 
-#         left_join(swap_cats, by="Sample_ID") %>% 
-#             
-#             mutate(
-#             SwapCat_ID = ifelse(
-#                 is.na(Subject_ID),
-#                 sapply(Sample_ID, \(x) unlist(strsplit(x, split=":"))[2]),
-#                 Subject_ID
-#             )
-#         )
-#     corrections_graph <- graph_from_data_frame(applied_relabels, directed=TRUE)
-#     ghost_samples <- intersect(V(corrections_graph)$name, relabel_data %>% filter(is.na(Genotype_Group_ID)) %>% pull(Sample_ID))
-#     V(corrections_graph)$color <- "orange"
-#     V(corrections_graph)[ghost_samples]$color <- "lightgrey"
-#     V(corrections_graph)$size <- 12
-#     E(corrections_graph)$width <- 6
-#     E(corrections_graph)$color <- "forestgreen"
-#     
-#     return(corrections_graph)
-# }
-
-
 setGeneric("solve_majority_search", function(object, unambiguous_only=FALSE) {
     standardGeneric("solve_majority_search")
 })
@@ -237,6 +210,7 @@ setGeneric("write_corrections", function(object) {
 
 setMethod("solve_majority_search", "MislabelSolver",
           function(object, unambiguous_only=FALSE) {
+              set.seed(1)
               print("Starting majority search")
               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                   return(object)
@@ -288,6 +262,7 @@ setMethod("solve_majority_search", "MislabelSolver",
 
 setMethod("solve_comprehensive_search", "MislabelSolver",
           function(object) {
+              set.seed(1)
               print("Starting comprehensive search")
               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                   return(object)
@@ -479,6 +454,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
 # 5. mapply will give the delta column
 setMethod("solve_local_search", "MislabelSolver", 
           function(object, n_iter=1, include_ghost=FALSE, filter_concordant_vertices=FALSE) {
+              set.seed(1)
               print("Starting local search")
               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                   return(object)
@@ -582,6 +558,7 @@ setMethod("solve_local_search", "MislabelSolver",
 # 10. rbind all swaps found for the component
 setMethod("solve_local_search_bulk", "MislabelSolver", 
           function(object, n_iter=1, frac_per_iter=0.10, include_ghost=FALSE, filter_concordant_vertices=FALSE) {
+              set.seed(1)
               print("Starting bulk local search")
               calc_scaled_entropy <- function(x) {
                   return(sum(x*log(x/sum(x)), na.rm=TRUE))
@@ -716,7 +693,7 @@ setMethod("solve_local_search_bulk", "MislabelSolver",
 
 setMethod("solve", "MislabelSolver",
           function(object) {
-              
+              set.seed(1)
               while (TRUE) {
                   if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
                       break
@@ -1972,5 +1949,33 @@ load_test_case <- function(test_name) {
 #               return(object)
 #           }
 # )
+
+# .generate_corrections_graph <- function(relabel_data, swap_cats) {
+#     applied_relabels <- relabel_data %>% 
+#         filter(Init_Sample_ID != Sample_ID) %>% 
+#         select(
+#             Init_Sample_ID,
+#             Sample_ID
+#         ) %>% 
+#         left_join(swap_cats, by="Sample_ID") %>% 
+#             
+#             mutate(
+#             SwapCat_ID = ifelse(
+#                 is.na(Subject_ID),
+#                 sapply(Sample_ID, \(x) unlist(strsplit(x, split=":"))[2]),
+#                 Subject_ID
+#             )
+#         )
+#     corrections_graph <- graph_from_data_frame(applied_relabels, directed=TRUE)
+#     ghost_samples <- intersect(V(corrections_graph)$name, relabel_data %>% filter(is.na(Genotype_Group_ID)) %>% pull(Sample_ID))
+#     V(corrections_graph)$color <- "orange"
+#     V(corrections_graph)[ghost_samples]$color <- "lightgrey"
+#     V(corrections_graph)$size <- 12
+#     E(corrections_graph)$width <- 6
+#     E(corrections_graph)$color <- "forestgreen"
+#     
+#     return(corrections_graph)
+# }
+
 
 
