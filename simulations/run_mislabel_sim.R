@@ -46,10 +46,10 @@ params_grid_file <- cmd_args[1]
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 1000
+    n_subjects = 250
     n_samples_per_subject = 2
-    n_swap_cats = 2
-    fraction_mislabel = 0.35
+    n_swap_cats = 3
+    fraction_mislabel = 0.6
     fraction_anchor = 0.06
     fraction_ghost = 0.1
     seed = 1990
@@ -238,7 +238,7 @@ for (i in 1:nrow(params_grid)) {
             errorMessage <- paste("Error for sim_name:", sim_name, "\n", "Error message:", conditionMessage(e))
             if (grepl("reached elapsed time limit", errorMessage)) {
                 ## Create tracker to show this sim timed out
-                file.create(file.path(args_list$output_dir, "03_timeout_2hrs", sim_name))
+                file.create(file.path(args_list$output_dir, "03_timeout_2_hrs", sim_name))
             }
             print(errorMessage)
         }

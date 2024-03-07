@@ -8,17 +8,23 @@
 # library(reshape2)
 # library(glue)
 
-# 1. Memory optimization by avoiding genotype votes in majority search (instead can just make a list of sorted vectors? will take more time)
-# 2. Memory optimization by only doing distances in local search by component (most distances are Inf)
-# 3. Memory optimization by avoiding making the distances matrix
-# 4. Time optimization by doing a bulk search for local search (done but needs testing and already ran sims without it)
-# 5. Majority search doesn't currently allow for ghosts or deletions
-# 6. Don't run set.seed(1), switch everything to with_seed
+## TODO
+# Majority search doesn't currently allow for ghosts or deletions
+# solve_comprehensive_search: what happens when number of genotype groups exceeds number of subjects?
+# solve_majority_search: Memory optimization by avoiding genotype votes in majority search (instead can just make a list of sorted vectors? will take more time)
+# misc: Don't run set.seed(1), switch everything to with_seed
+# structure: have user pass in SwapCat_ID as part sample_genotype_data, refactor to be called sample_metadata. Then remove swap_cat passes
+
+## DONE
+# comprehensive_search: fix bug of n > r
+# find_neighbors: Memory optimization by doing sparse matrices for distance matrix
+# find_neighbors: Memory and runtime optimization by computing distance with matrix multiplication
+# solve_local_search: time optimization by doing a bulk search for local search
 
 EMPTY_RELABELS <- data.frame(relabel_from=character(0), relabel_to=character(0))
 VISNETWORK_SWAPCAT_SHAPES <- c("dot", "square", "triangle", "diamond", "star")
 LABEL_NOT_FOUND <- "LABELNOTFOUND"
-MAX_GENOTYPES_COMP_SEARCH <- 8
+MAX_GENOTYPES_COMP_SEARCH <- 7
 MAX_NEIGHBORS_LOCAL_SEARCH <- 1e6
 
 setClass("MislabelSolver",
@@ -216,6 +222,8 @@ setMethod("solve_majority_search", "MislabelSolver",
                   return(object)
               }
               
+              putative_subjects <- object@.solve_state$putative_subjects
+              
               ## 1. Update putative subjects
               votes <- table(object@.solve_state$unsolved_relabel_data$Genotype_Group_ID, 
                              object@.solve_state$unsolved_relabel_data$Subject_ID)
@@ -247,12 +255,24 @@ setMethod("solve_majority_search", "MislabelSolver",
                   anti_join(object@.solve_state$putative_subjects, by=c("Genotype_Group_ID", "Subject_ID"))
               object <- .update_putative_subjects(object, new_putative_subjects)
               
+              ## If comprehensive search didn't identify any new putative subjects, there 
+              ## is no point looking for new cycles
+              putative_subjects_new <- object@.solve_state$putative_subjects
+              if (nrow(putative_subjects) == nrow(putative_subjects_new)) {
+                  if (identical(putative_subjects, putative_subjects_new)) {
+                      return(object)
+                  }
+              }
+              
               ## 2. Find relabel cycles
               unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data
               putative_subjects <- object@.solve_state$putative_subjects
               swap_cats <- object@swap_cats
-              unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data
-              relabels <- .find_relabel_cycles_from_putative_subjects(unsolved_relabel_data, putative_subjects, swap_cats, unsolved_ghost_data, unambiguous_only)
+              relabels <- .find_relabel_cycles_from_putative_subjects(unsolved_relabel_data, 
+                                                                      putative_subjects, 
+                                                                      swap_cats, 
+                                                                      unambiguous_only=unambiguous_only,
+                                                                      allow_unknowns=FALSE)
               
               ## 3. Relabel samples and update solve state
               object <- .relabel_samples(object, relabels)
@@ -274,15 +294,13 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
               ## 1. Update putative subjects
               component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
               for (component_id in component_ids) {
-                  # print(component_id)
                   cc_unsolved_relabel_data <- object@.solve_state$unsolved_relabel_data %>% filter(Component_ID == component_id)
                   cc_unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data %>% filter(Component_ID == component_id)
-                  # cc_unsolved_ghost_data <- object@.solve_state$unsolved_ghost_data %>% filter(Subject_ID %in% cc_unsolved_relabel_data$Subject_ID)
                   cc_sample_ids <- c(cc_unsolved_relabel_data$Sample_ID, cc_unsolved_ghost_data$Sample_ID)
                   cc_swap_cat_ids <- as.character(unique(swap_cats[swap_cats$Sample_ID %in% cc_sample_ids, "SwapCat_ID", drop=TRUE]))
                   cc_genotypes <- unique(cc_unsolved_relabel_data$Genotype_Group_ID)
                   cc_subjects <- unique(cc_unsolved_relabel_data$Subject_ID)
-                  # length(unique(cc_unsolved_relabel_data$Genotype_Group_ID)) > length(unique(cc_unsolved_relabel_data$Subject_ID))
+                  
                   ## For now, pass out of components where number of Genotype_Group(s) is greater than number of Subject_ID(s)
                   if (length(cc_genotypes) > length(cc_subjects)) {
                       # print(component_id)
@@ -294,6 +312,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   locked_subjects <- intersect(putative_subjects$Subject_ID, cc_subjects)
                   free_genotypes <- setdiff(cc_genotypes, locked_genotypes)
                   free_subjects <- setdiff(cc_subjects, locked_subjects)
+                  assert_that(length(locked_genotypes) == length(locked_subjects), "")
                   if (length(free_genotypes) > MAX_GENOTYPES_COMP_SEARCH) {
                       next
                   }
@@ -430,6 +449,15 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   new_putative_subjects <- new_putative_subjects %>%  
                       anti_join(object@.solve_state$putative_subjects, by=c("Genotype_Group_ID", "Subject_ID"))
                   object <- .update_putative_subjects(object, new_putative_subjects)
+              }
+              
+              ## If comprehensive search didn't identify any new putative subjects, there 
+              ## is no point looking for new cycles
+              putative_subjects_new <- object@.solve_state$putative_subjects
+              if (nrow(putative_subjects) == nrow(putative_subjects_new)) {
+                  if (identical(putative_subjects, putative_subjects_new)) {
+                      return(object)
+                  }
               }
               
               ## Find relabel cycles
@@ -1128,8 +1156,11 @@ setMethod("write_corrections", "MislabelSolver",
     
     unsolved_relabel_data <- unsolved_relabel_data %>% 
         left_join(swap_cats, by="Sample_ID")
-    unsolved_ghost_data <- unsolved_ghost_data %>% 
-        left_join(swap_cats, by="Sample_ID")
+    
+    if (allow_ghosts) {
+        unsolved_ghost_data <- unsolved_ghost_data %>% 
+            left_join(swap_cats, by="Sample_ID")
+    }
     
     mislabel_data <- unsolved_relabel_data %>%
         left_join(putative_subjects %>% rename(Putative_Subject_ID = Subject_ID), 
@@ -1300,7 +1331,10 @@ setMethod("write_corrections", "MislabelSolver",
         unique()
     unique_pairs <- anti_join(unique_pairs_within2, unique_pairs_exact1, by=c("Sample_A", "Sample_B"))
     
-    ## Criteria 2: filter only pairs of vertices that are within the same swap category
+    ## Criteria 2: filter out pairs of vertices that include elements in anchor_samples
+    unique_pairs <- unique_pairs[!(unique_pairs$Sample_A %in% object@anchor_samples |unique_pairs$Sample_B %in% object@anchor_samples), ]
+    
+    ## Criteria 3: filter only pairs of vertices that are within the same swap category
     unique_pairs <- unique_pairs %>% 
         left_join(swap_cats[, c("Sample_ID", "SwapCat_ID")], by=c("Sample_A"="Sample_ID")) %>% 
         dplyr::rename("SwapCat_A"="SwapCat_ID") %>% 
@@ -1309,7 +1343,7 @@ setMethod("write_corrections", "MislabelSolver",
         filter(SwapCat_A == SwapCat_B) %>% 
         select(Sample_A, Sample_B)
     
-    ## Criteria 3: filter out vertices that have at least 1 concordant edge
+    ## Criteria 4: filter out vertices that have at least 1 concordant edge
     if (filter_concordant_vertices) {
         concordant_edges <- E(combined_graph)[E(combined_graph)$concordant]
         concordant_vertices <- unique(c(ends(combined_graph, concordant_edges)))
@@ -1320,24 +1354,37 @@ setMethod("write_corrections", "MislabelSolver",
             )
     }
     
-    ## Criteria 4: filter out pairs of vertices where both sides will violate putative_subjects
-    # unique_pairs %<>% left_join(
-    #         object@.solve_state$unsolved_relabel_data[, c("Sample_ID", "Genotype_Group_ID")],
-    #         by=c("Sample_A"="Sample_ID")
-    #     ) %>% left_join(
-    #         object@sample_genotype_data[, c("Sample_ID", "Subject_ID")],
-    #         by=c("Sample_B"="Sample_ID")
-    #     ) %>%
-    #     rename("new_Subject_ID"="Subject_ID") %>%
-    #     left_join(
-    #         object@.solve_state$putative_subjects,
-    #         by="Genotype_Group_ID"
-    #     ) %>%
-    #     mutate(
-    #         Valid_Swap = is.na(Subject_ID) | new_Subject_ID == Subject_ID
-    #     ) %>%
-    #     filter(Valid_Swap) %>%
-    #     select(Sample_A, Sample_B)
+    ## Criteria 5: filter out pairs of vertices where both sides will violate putative_subjects
+    unique_pairs <- unique_pairs %>%
+        left_join(
+            object@.solve_state$unsolved_relabel_data[, c("Sample_ID", "Subject_ID", "Genotype_Group_ID")],
+            by=c("Sample_A"="Sample_ID")) %>% 
+        rename("Subject_A"="Subject_ID", "Genotype_Group_A"="Genotype_Group_ID") %>% 
+        left_join(
+            object@.solve_state$putative_subjects %>% filter(!is.na(Genotype_Group_ID)),
+            by=c("Genotype_Group_A"="Genotype_Group_ID")) %>% 
+        rename("Putative_Subject_A"="Subject_ID") %>%
+        left_join(
+            object@.solve_state$unsolved_relabel_data[, c("Sample_ID", "Subject_ID", "Genotype_Group_ID")],
+            by=c("Sample_B"="Sample_ID")) %>% 
+        rename("Subject_B"="Subject_ID", "Genotype_Group_B"="Genotype_Group_ID") %>% 
+        left_join(
+            object@.solve_state$putative_subjects %>% filter(!is.na(Genotype_Group_ID)),
+            by=c("Genotype_Group_B"="Genotype_Group_ID")) %>% 
+        rename("Putative_Subject_B"="Subject_ID") %>% 
+        mutate(
+            # The swap is invalid if
+            # 1. Sample_A is already in its Putative_Subject
+            # 2. Sample_B is already in its Putative_Subject
+            # For swaps where the putative subjects of both samples are assigned, the swap is also invalid if
+            # 3. Neither Sample_A nor Sample_B match their Putative_Subject after
+            Invalid_Swap = 
+                (!is.na(Putative_Subject_A) & Subject_A == Putative_Subject_A) |
+                (!is.na(Putative_Subject_B) & Subject_B == Putative_Subject_B) | 
+                (!is.na(Putative_Subject_A) & !is.na(Putative_Subject_B) & Putative_Subject_A != Subject_B & Putative_Subject_B != Subject_A)
+        ) %>%
+        filter(!Invalid_Swap) %>%
+        select(Sample_A, Sample_B)
     
     return(unique_pairs)
 }
