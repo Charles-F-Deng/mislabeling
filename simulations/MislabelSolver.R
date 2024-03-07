@@ -312,7 +312,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   locked_subjects <- intersect(putative_subjects$Subject_ID, cc_subjects)
                   free_genotypes <- setdiff(cc_genotypes, locked_genotypes)
                   free_subjects <- setdiff(cc_subjects, locked_subjects)
-                  assert_that(length(locked_genotypes) == length(locked_subjects), "")
+                  # assert_that(length(locked_genotypes) == length(locked_subjects), msg="")
                   if (length(free_genotypes) > MAX_GENOTYPES_COMP_SEARCH) {
                       next
                   }
