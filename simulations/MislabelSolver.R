@@ -9,6 +9,7 @@
 # library(glue)
 
 ## TODO
+# plotting: for the unsolved option, include samples where label is not found
 # Majority search doesn't currently allow for ghosts or deletions
 # solve_comprehensive_search: what happens when number of genotype groups exceeds number of subjects?
 # solve_majority_search: Memory optimization by avoiding genotype votes in majority search (instead can just make a list of sorted vectors? will take more time)
@@ -16,6 +17,7 @@
 # structure: have user pass in SwapCat_ID as part sample_genotype_data, refactor to be called sample_metadata. Then remove swap_cat passes
 
 ## DONE
+# plotting: use red vertices for samples where label is not found
 # comprehensive_search: fix bug of n > r
 # find_neighbors: Memory optimization by doing sparse matrices for distance matrix
 # find_neighbors: Memory and runtime optimization by computing distance with matrix multiplication
@@ -102,57 +104,6 @@ setMethod("initialize", "MislabelSolver",
           }
 )
 
-setMethod("plot", "MislabelSolver",
-          function(x, 
-                   y=NULL, 
-                   unsolved=TRUE, 
-                   query_by=c("Init_Component_ID", "Component_ID", "Subject_ID", "Genotype_Group_ID", "Sample_ID"),
-                   query_val=NULL) {
-              if (unsolved) {
-                  relabel_data <- x@.solve_state$unsolved_relabel_data
-                  ghost_data <- x@.solve_state$unsolved_ghost_data
-              } else {
-                  relabel_data <- x@.solve_state$relabel_data %>% filter(!is.na(Genotype_Group_ID))
-                  ghost_data <- x@.solve_state$relabel_data %>% filter(is.na(Genotype_Group_ID))
-              }
-              anchor_samples <- x@anchor_samples
-              swap_cats <- x@swap_cats
-              if (!is.null(query_val)) {
-                  query_by <- as.character(query_by)
-                  query_by <- match.arg(query_by)
-                  if (query_by == "Init_Component_ID") {
-                      component_id <- rbind(relabel_data, ghost_data) %>% 
-                          filter(!!sym(query_by) == query_val) %>% 
-                          pull(Init_Component_ID) %>% 
-                          unique()
-                  } else {
-                      component_id <- rbind(relabel_data, ghost_data) %>% 
-                          filter(!!sym(query_by) == query_val) %>% 
-                          pull(Component_ID) %>% 
-                          unique()
-                  }
-                  if (length(component_id) == 0) {
-                      warning(glue("No samples found for 'query_by' \"{query_by}\" and 'query_val' \"{query_val}\""))
-                      return()
-                  }
-                  component_id <- component_id[[1]]
-                  if (query_by == "Init_Component_ID") {
-                      relabel_data <- relabel_data %>% filter(Init_Component_ID == component_id)
-                      ghost_data <- ghost_data %>% filter(Init_Component_ID == component_id)
-                  } else {
-                      relabel_data <- relabel_data %>% filter(Component_ID == component_id)
-                      ghost_data <- ghost_data %>% filter(Component_ID == component_id)
-                  }
-              }
-              graph <- .generate_graph(relabel_data, graph_type = "combined", ghost_data, anchor_samples, swap_cats, populate_plotting_attributes=TRUE)
-              with_seed(1, {
-                  l_mds <- layout_with_mds(graph)
-                  l_drl <- layout_with_drl(graph, use.seed=TRUE, seed=l_mds)
-                  visIgraph(graph, layout = "layout_with_graphopt", start=l_drl) 
-              })
-          }
-)
-
 setGeneric("plot_corrections", 
            function(x, 
                     y=NULL, 
@@ -219,6 +170,7 @@ setMethod("solve_majority_search", "MislabelSolver",
               set.seed(1)
               print("Starting majority search")
               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
+                  print("0 samples relabeled")
                   return(object)
               }
               
@@ -260,6 +212,7 @@ setMethod("solve_majority_search", "MislabelSolver",
               putative_subjects_new <- object@.solve_state$putative_subjects
               if (nrow(putative_subjects) == nrow(putative_subjects_new)) {
                   if (identical(putative_subjects, putative_subjects_new)) {
+                      print("0 samples relabeled")
                       return(object)
                   }
               }
@@ -276,6 +229,7 @@ setMethod("solve_majority_search", "MislabelSolver",
               
               ## 3. Relabel samples and update solve state
               object <- .relabel_samples(object, relabels)
+              print(paste0(nrow(relabels), " samples relabeled"))
               return(object)
           }
 )
@@ -285,6 +239,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
               set.seed(1)
               print("Starting comprehensive search")
               if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
+                  print("0 samples relabeled")
                   return(object)
               }
               
@@ -312,7 +267,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   locked_subjects <- intersect(putative_subjects$Subject_ID, cc_subjects)
                   free_genotypes <- setdiff(cc_genotypes, locked_genotypes)
                   free_subjects <- setdiff(cc_subjects, locked_subjects)
-                  # assert_that(length(locked_genotypes) == length(locked_subjects), msg="")
+                  
                   if (length(free_genotypes) > MAX_GENOTYPES_COMP_SEARCH) {
                       next
                   }
@@ -456,6 +411,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
               putative_subjects_new <- object@.solve_state$putative_subjects
               if (nrow(putative_subjects) == nrow(putative_subjects_new)) {
                   if (identical(putative_subjects, putative_subjects_new)) {
+                      print("0 samples relabeled")
                       return(object)
                   }
               }
@@ -470,7 +426,7 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
               
               ## Relabel samples and update solve state
               object <- .relabel_samples(object, relabels) 
-              
+              print(paste0(nrow(relabels), " samples relabeled"))
               return(object)
           }
 )
@@ -484,19 +440,18 @@ setMethod("solve_local_search", "MislabelSolver",
           function(object, n_iter=1, include_ghost=FALSE, filter_concordant_vertices=FALSE) {
               set.seed(1)
               print("Starting local search")
-              if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
-                  return(object)
-              }
-              
               calc_scaled_entropy <- function(x) {
                   return(sum(x*log(x/sum(x)), na.rm=TRUE))
               }
               
-              unsolved_all_data <- rbind(object@.solve_state$unsolved_relabel_data,
-                                         object@.solve_state$unsolved_ghost_data)
               for (i in 1:n_iter) {
                   print(glue("Iteration {i}:: local search, 'include_ghost'={include_ghost}, 'filter_concordant_vertices'={filter_concordant_vertices}"))
-                  
+                  unsolved_all_data <- rbind(object@.solve_state$unsolved_relabel_data,
+                                             object@.solve_state$unsolved_ghost_data)
+                  if (nrow(object@.solve_state$unsolved_relabel_data) == 0) {
+                      print("0 samples relabeled")
+                      return(object)
+                  }
                   votes <- table(object@.solve_state$unsolved_relabel_data$Genotype_Group_ID, 
                                  object@.solve_state$unsolved_relabel_data$Subject_ID)
                   base_entropies <- apply(votes, MARGIN=1, calc_scaled_entropy)
@@ -568,6 +523,7 @@ setMethod("solve_local_search", "MislabelSolver",
                   relabels <- relabels[!is.na(relabels[, 1]) & !is.na(relabels[, 2]), ]
                   relabels <- rbind(relabels, data.frame(relabel_from=relabels$relabel_to, relabel_to=relabels$relabel_from))
                   object <- .relabel_samples(object, relabels)
+                  print(paste0(nrow(relabels), " samples relabeled"))
               }
               
               return(object)
@@ -969,6 +925,66 @@ setMethod("write_corrections", "MislabelSolver",
           }
 )
 
+
+setMethod("plot", "MislabelSolver",
+          function(x, 
+                   y=NULL, 
+                   unsolved=TRUE, 
+                   query_by=c("Init_Component_ID", "Component_ID", "Subject_ID", "Genotype_Group_ID", "Sample_ID"),
+                   query_val=NULL) {
+              if (unsolved) {
+                  relabel_data <- x@.solve_state$unsolved_relabel_data
+                  ghost_data <- x@.solve_state$unsolved_ghost_data
+              } else {
+                  relabel_data <- x@.solve_state$relabel_data %>% filter(!is.na(Genotype_Group_ID))
+                  ghost_data <- x@.solve_state$relabel_data %>% filter(is.na(Genotype_Group_ID))
+              }
+              anchor_samples <- x@anchor_samples
+              swap_cats <- x@swap_cats
+              if (!is.null(query_val)) {
+                  query_by <- as.character(query_by)
+                  query_by <- match.arg(query_by)
+                  if (query_by == "Init_Component_ID") {
+                      component_id <- rbind(relabel_data, ghost_data) %>% 
+                          filter(!!sym(query_by) == query_val) %>% 
+                          pull(Init_Component_ID) %>% 
+                          unique()
+                  } else {
+                      component_id <- rbind(relabel_data, ghost_data) %>% 
+                          filter(!!sym(query_by) == query_val) %>% 
+                          pull(Component_ID) %>% 
+                          unique()
+                  }
+                  if (length(component_id) == 0) {
+                      warning(glue("No samples found for 'query_by' \"{query_by}\" and 'query_val' \"{query_val}\""))
+                      return()
+                  }
+                  component_id <- component_id[[1]]
+                  if (query_by == "Init_Component_ID") {
+                      relabel_data <- relabel_data %>% filter(Init_Component_ID == component_id)
+                      ghost_data <- ghost_data %>% filter(Init_Component_ID == component_id)
+                  } else {
+                      relabel_data <- relabel_data %>% filter(Component_ID == component_id)
+                      ghost_data <- ghost_data %>% filter(Component_ID == component_id)
+                  }
+              }
+              graph <- .generate_graph(relabel_data, graph_type = "combined", ghost_data, anchor_samples, swap_cats, populate_plotting_attributes=TRUE)
+              with_seed(1, {
+                  l_mds <- layout_with_mds(graph)
+                  l_drl <- layout_with_drl(graph, use.seed=TRUE, seed=l_mds)
+                  visIgraph(graph, layout = "layout_with_graphopt", start=l_drl) 
+              })
+          }
+)
+
+setMethod("summary", "MislabelSolver",
+          function(object) {
+              print("MislabelSolver summary statistics")
+              cat("\t", "Number of Sample_ID(s): ", length(object@sample_genotype_data$Sample_ID))
+              cat("\t", "test")
+          }
+) 
+summary(object)
 ################################################################################
 ##################               SOLVE HELPERS                ##################
 ################################################################################
@@ -1661,8 +1677,10 @@ setMethod("write_corrections", "MislabelSolver",
         V(graph)$shape <- sample_shapes
     }
     anchor_samples <- intersect(anchor_samples, V(graph)$name)
+    label_not_found_samples <- V(graph)$name[grepl(LABEL_NOT_FOUND, V(graph)$name)]
     V(graph)$color <- "orange"
     V(graph)[anchor_samples]$color <- "forestgreen"
+    V(graph)[label_not_found_samples]$color <- "firebrick"
     V(graph)$size <- 12
     if (graph_type == "combined") {
         V(graph)[ghost_samples]$color <- "lightgrey"
@@ -1680,7 +1698,7 @@ setMethod("write_corrections", "MislabelSolver",
     return(graph)
 }
 
-.generate_corrections_graph <- function(relabel_data) {
+ .generate_corrections_graph <- function(relabel_data) {
     applied_relabels <- relabel_data %>% 
         filter(Init_Sample_ID != Sample_ID) %>% 
         select(

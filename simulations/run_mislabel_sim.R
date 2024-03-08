@@ -46,13 +46,13 @@ params_grid_file <- cmd_args[1]
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 250
-    n_samples_per_subject = 2
-    n_swap_cats = 3
+    n_subjects = 100
+    n_samples_per_subject = 5
+    n_swap_cats = 5
     fraction_mislabel = 0.6
-    fraction_anchor = 0.06
-    fraction_ghost = 0.1
-    seed = 1990
+    fraction_anchor = 0.02
+    fraction_ghost = 0.04
+    seed = 1986
     output_dir = "/Users/charlesdeng/Workspace/mislabeling/test_output"
     sim_name = "testtest"
     args_list = list(n_subjects = n_subjects, 
@@ -229,7 +229,6 @@ params_grid <- readRDS(params_grid_file)
 for (i in 1:nrow(params_grid)) {
     args_list <- as.list(params_grid[i, ])
     sim_name <- args_list$sim_name
-    if (file.exists(file.path(args_list$output_dir, "01_tried", sim_name))) {next}
     tryCatch(
         expr = {
             withTimeout(do.call(run_sim, args_list), timeout=2 * 60 * 60)
