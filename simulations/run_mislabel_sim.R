@@ -46,13 +46,13 @@ params_grid_file <- cmd_args[1]
 # 4. iterative ensemble with local search
 
 local({
-    n_subjects = 100
-    n_samples_per_subject = 5
-    n_swap_cats = 5
-    fraction_mislabel = 0.6
-    fraction_anchor = 0.02
+    n_subjects = 250
+    n_samples_per_subject = 6
+    n_swap_cats = 20
+    fraction_mislabel = 0.45
+    fraction_anchor = 0.06
     fraction_ghost = 0.04
-    seed = 1986
+    seed = 1988
     output_dir = "/Users/charlesdeng/Workspace/mislabeling/test_output"
     sim_name = "testtest"
     args_list = list(n_subjects = n_subjects, 
@@ -245,4 +245,4 @@ for (i in 1:nrow(params_grid)) {
     gc()
 }
 
-
+plot

@@ -9,12 +9,13 @@
 # library(glue)
 
 ## TODO
+# structure: have user pass in SwapCat_ID as part sample_genotype_data, refactor to be called sample_metadata. Then remove swap_cat passes
 # plotting: for the unsolved option, include samples where label is not found
+# create a summary function
 # Majority search doesn't currently allow for ghosts or deletions
 # solve_comprehensive_search: what happens when number of genotype groups exceeds number of subjects?
 # solve_majority_search: Memory optimization by avoiding genotype votes in majority search (instead can just make a list of sorted vectors? will take more time)
 # misc: Don't run set.seed(1), switch everything to with_seed
-# structure: have user pass in SwapCat_ID as part sample_genotype_data, refactor to be called sample_metadata. Then remove swap_cat passes
 
 ## DONE
 # plotting: use red vertices for samples where label is not found
@@ -1052,7 +1053,6 @@ setMethod("summary", "MislabelSolver",
             select(Subject_ID, Genotype_Group_ID) %>% 
             unique()
         object <- .update_putative_subjects(object, anchor_putative_subjects)
-        
     }
     solved_putative_subjects <- unsolved_relabel_data %>% 
         filter(Solved) %>% 

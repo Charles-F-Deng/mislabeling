@@ -12,3 +12,5 @@ old/
 mscbb_check_results/
 corrections_*/
 test_output/
+simulation_plots.Rmd
+
