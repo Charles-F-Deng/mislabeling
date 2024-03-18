@@ -9,17 +9,21 @@
 # library(glue)
 
 ## TODO
-# swap_cat_shape - only need it for plotting. appropriate to put it in relabel_data or does it belong somewhere else
+# solve_comprehensive_search: what happens when number of genotype groups exceeds number of subjects?
+# Majority search doesn't currently allow for ghosts or deletions. Fix this in find_relabel_samples_from_putative_subjects
+
 # Add a panel of tests to run automatically and compare against baselines
+# create a summary function
+# A lot of work needed in write_corrections
+# For label not found option, I think right now its possible to make duplicates
+
+# swap_cat_shape - only need it for plotting. appropriate to put it in relabel_data or does it belong somewhere else
 # relabels: fix validation to ensure you can only relabel unsolved samples
 # local_search: change find_neighbors to take in parameters unsolved_relabel_data. Then switch local search to be component-by-component
 # plotting: for the unsolved option, include samples where label is not found
 # plotting: redo plot_corrections. Also, maybe add swaps created on top of original graph
-# For label not found option, I think right now its possible to make duplicates
-# create a summary function
-# Majority search doesn't currently allow for ghosts or deletions. Fix this in find_relabel_samples_from_putative_subjects
+
 # Revisit cycle detection algorithm
-# solve_comprehensive_search: what happens when number of genotype groups exceeds number of subjects?
 # misc: Don't run set.seed(1), switch everything to with_seed
 # misc: Standardize names for unsolved_relabel_data, relabel_data, unsolved_ghost_data, etc.
 

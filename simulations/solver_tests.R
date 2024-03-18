@@ -1,9 +1,9 @@
-n_subjects = 10
-n_samples_per_subject = 10
-n_swap_cats = 3
-fraction_mislabel = 0.2
-fraction_anchor = 0.2
-fraction_ghost = 0.2
+n_subjects = 7
+n_samples_per_subject = 6
+n_swap_cats = 2
+fraction_mislabel = 0.3
+fraction_anchor = 0
+fraction_ghost = 0
 seed = 1986
 output_dir = "/Users/charlesdeng/Workspace/mislabeling/test_output"
 sim_name = "testtest"
