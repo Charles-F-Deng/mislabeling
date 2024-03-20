@@ -28,6 +28,8 @@
 # misc: Standardize names for unsolved_relabel_data, relabel_data, unsolved_ghost_data, etc.
 
 ## DONE
+# plotting: allow option to collapse samples
+# structure: track ghost and anchor information in relabel_data
 # structure: have user pass in SwapCat_ID as part sample_genotype_data, refactor to be called sample_metadata. Then remove swap_cat passes
 # initialize: assign component_ID even if the component is solved to begin with
 # plotting: use red vertices for samples where label is not found
@@ -71,7 +73,8 @@ setMethod("initialize", "MislabelSolver",
               all_swap_cat_ids <- names(sort(table(swap_cats$SwapCat_ID), decreasing=TRUE))
               swap_cat_shapes <- data.frame(
                   SwapCat_ID = all_swap_cat_ids,
-                  SwapCat_Shape = "dot"
+                  SwapCat_Shape = "dot",
+                  vertex_size_scalar = 1
               )
               if (length(all_swap_cat_ids) <= length(VISNETWORK_SWAPCAT_SHAPES)) {
                   swap_cat_shapes$SwapCat_Shape = VISNETWORK_SWAPCAT_SHAPES[1:length(all_swap_cat_ids)]
@@ -88,6 +91,8 @@ setMethod("initialize", "MislabelSolver",
                   mutate(
                       Init_Sample_ID = Sample_ID,
                       Init_Subject_ID = Subject_ID,
+                      Is_Ghost = is.na(Genotype_Group_ID),
+                      Is_Anchor = Init_Sample_ID %in% anchor_samples,
                       Solved = FALSE
                   ) %>% 
                   left_join(swap_cats, by="Sample_ID")
@@ -201,6 +206,8 @@ setMethod("solve_comprehensive_search", "MislabelSolver",
                   print("0 samples relabeled")
                   return(object)
               }
+              
+              putative_subjects <- object@.solve_state$putative_subjects
               
               ## 1. Update putative subjects
               component_ids <- sort(unique(object@.solve_state$unsolved_relabel_data$Component_ID))
@@ -870,6 +877,7 @@ setMethod("plot", "MislabelSolver",
           function(x, 
                    y=NULL, 
                    unsolved=TRUE, 
+                   collapse_samples=FALSE,
                    query_by=c("Init_Component_ID", "Component_ID", "Subject_ID", "Genotype_Group_ID", "Sample_ID"),
                    query_val=NULL) {
               if (unsolved) {
@@ -907,7 +915,8 @@ setMethod("plot", "MislabelSolver",
                       ghost_data <- ghost_data %>% filter(Component_ID == component_id)
                   }
               }
-              graph <- .generate_graph(relabel_data, graph_type = "combined", ghost_data, anchor_samples, populate_plotting_attributes=TRUE)
+              graph <- .generate_graph(relabel_data, graph_type = "combined", ghost_data, 
+                                       populate_plotting_attributes=TRUE, collapse_samples=collapse_samples)
               with_seed(1, {
                   l_mds <- layout_with_mds(graph)
                   l_drl <- layout_with_drl(graph, use.seed=TRUE, seed=l_mds)
@@ -1039,11 +1048,11 @@ setMethod("summary", "MislabelSolver",
     ## 5. Update relabel_data, and unsolved_relabel_data
     if (initialization) {
         unsolved_relabel_data <- unsolved_relabel_data %>% 
-            select(Init_Sample_ID, Init_Subject_ID, Genotype_Group_ID, Component_ID, Sample_ID, Subject_ID, Solved, SwapCat_ID, SwapCat_Shape) %>% 
+            select(Init_Sample_ID, Init_Subject_ID, Genotype_Group_ID, Component_ID, Sample_ID, Subject_ID, Solved, Is_Ghost, Is_Anchor, SwapCat_ID, SwapCat_Shape, vertex_size_scalar) %>% 
             mutate(Init_Component_ID = Component_ID) %>% 
             relocate(Init_Component_ID, .before=Component_ID)
         unsolved_ghost_data <- unsolved_ghost_data %>% 
-            select(Init_Sample_ID, Init_Subject_ID, Genotype_Group_ID, Component_ID, Sample_ID, Subject_ID, Solved, SwapCat_ID, SwapCat_Shape) %>% 
+            select(Init_Sample_ID, Init_Subject_ID, Genotype_Group_ID, Component_ID, Sample_ID, Subject_ID, Solved, Is_Ghost, Is_Anchor, SwapCat_ID, SwapCat_Shape, vertex_size_scalar) %>% 
             mutate(Init_Component_ID = Component_ID) %>% 
             relocate(Init_Component_ID, .before=Component_ID)
         relabel_data <- rbind(unsolved_relabel_data, unsolved_ghost_data)
@@ -1051,18 +1060,21 @@ setMethod("summary", "MislabelSolver",
         ## Update 'relabel_data' with new sample labels in 'unsolved_relabel_data' and 'unsolved_ghost_data'
         unsolved_data <- rbind(unsolved_relabel_data, unsolved_ghost_data)
         relabel_data <- object@.solve_state$relabel_data %>% 
-            left_join(unsolved_data[, c("Component_ID", "Sample_ID", "Subject_ID", "Init_Sample_ID", "Solved", "SwapCat_ID", "SwapCat_Shape")], 
+            left_join(unsolved_data[, c("Component_ID", "Sample_ID", "Subject_ID", "Init_Sample_ID", "Solved", "Is_Ghost", "Is_Anchor", "SwapCat_ID", "SwapCat_Shape", "vertex_size_scalar")], 
                       by="Init_Sample_ID", suffix = c(".x", ".y")) %>% 
             mutate(
                 Component_ID = coalesce(Component_ID.y, Component_ID.x),
                 Sample_ID = coalesce(Sample_ID.y, Sample_ID.x),
                 Subject_ID = coalesce(Subject_ID.y, Subject_ID.x),
                 Solved = coalesce(Solved.y, Solved.x),
+                Is_Ghost = coalesce(Is_Ghost.y, Is_Ghost.x),
+                Is_Anchor = coalesce(Is_Anchor.y, Is_Anchor.x),
                 SwapCat_ID = coalesce(SwapCat_ID.y, SwapCat_ID.x),
-                SwapCat_Shape = coalesce(SwapCat_Shape.y, SwapCat_Shape.x)
+                SwapCat_Shape = coalesce(SwapCat_Shape.y, SwapCat_Shape.x),
+                vertex_size_scalar = coalesce(vertex_size_scalar.y, vertex_size_scalar.x)
             ) %>% 
             select(-ends_with(c(".x", "y"))) %>% 
-            select(Init_Sample_ID, Init_Subject_ID, Genotype_Group_ID, Init_Component_ID, Component_ID, Sample_ID, Subject_ID, Solved, SwapCat_ID, SwapCat_Shape)
+            select(Init_Sample_ID, Init_Subject_ID, Genotype_Group_ID, Init_Component_ID, Component_ID, Sample_ID, Subject_ID, Solved, Is_Ghost, Is_Anchor, SwapCat_ID, SwapCat_Shape, vertex_size_scalar)
     }
     unsolved_relabel_data <- unsolved_relabel_data %>% filter(!Solved)
     unsolved_ghost_data <- unsolved_ghost_data %>% filter(!Solved)
@@ -1381,6 +1393,237 @@ setMethod("summary", "MislabelSolver",
 }
 
 ################################################################################
+##################               GRAPH HELPERS                ##################
+################################################################################
+
+# .plot_graph <- function(graph, to_write=FALSE) {
+#     edge_colors <- if (!is.null(E(graph)$edge_colors)) E(graph)$edge_colors else "grey"
+#     color <- if (!is.null(V(graph)$color)) V(graph)$color else "orange"
+#     layout_custom <- with_seed(layout_nicely(graph), seed=1987)
+#     vertex.label.cex <- 0.6
+#     vertex.size <- 5
+#     edge.arrow.size <- 0.8
+#     edge.width <- 3
+#     if (to_write) {
+#         vertex.label.cex <- 2
+#         vertex.size <- 5
+#         edge.arrow.size <- 3
+#         edge.width <- 8
+#     }
+#     
+#     my_plot <- plot(graph, vertex.size=vertex.size, vertex.label.cex=vertex.label.cex, edge.arrow.size=edge.arrow.size, 
+#                     edge.width=edge.width, edge.color=edge_colors, vertex.color=color, vertex.label.color="black", 
+#                     vertex.frame.color="transparent", layout=layout_custom)
+#     return(my_plot)
+# }
+
+.generate_graph <- function(
+        relabel_data, 
+        graph_type=c("label", "genotype", "combined"), 
+        ghost_data=NULL, 
+        populate_plotting_attributes=FALSE,
+        collapse_samples=FALSE
+) {
+    graph_type_mapping <- list(
+        label = "Subject_ID",
+        genotype = "Genotype_Group_ID",
+        combined = NA_character_
+    )
+    
+    ## Collapse samples mode should only run if the graph is being plotted
+    if (!populate_plotting_attributes) {
+        collapse_samples <- FALSE
+    }
+    
+    graph_type <- as.character(graph_type)
+    graph_type <- match.arg(graph_type)
+    
+    ## Ignore ghost samples when constructing genotype graph
+    if (graph_type == "genotype") {
+        ghost_data <- NULL
+    }
+    
+    if (collapse_samples) {
+        relabel_data <- relabel_data %>% 
+            group_by(Subject_ID, Genotype_Group_ID, SwapCat_ID) %>% 
+            mutate(
+                count = n(),
+                vertex_size_scalar = sqrt(sum(vertex_size_scalar)),
+                Is_Ghost = FALSE,
+                Is_Anchor = any(Is_Anchor),
+                Sample_ID = ifelse(count == 1, Sample_ID, paste(paste(count, "samples"), Subject_ID, SwapCat_ID, sep="\n"))
+            ) %>% 
+            select(Sample_ID, Subject_ID, Genotype_Group_ID, SwapCat_ID, SwapCat_Shape, count, vertex_size_scalar, Is_Ghost, Is_Anchor) %>% 
+            distinct()
+    }
+    
+    all_data <- relabel_data
+    
+    ghost_samples <- character(0)
+    if (!is.null(ghost_data)) {
+        if (collapse_samples) {
+            ghost_data <- ghost_data %>% 
+                group_by(Subject_ID, Genotype_Group_ID, SwapCat_ID) %>% 
+                mutate(
+                    count = n(),
+                    vertex_size_scalar = sqrt(sum(vertex_size_scalar)),
+                    Is_Ghost = TRUE,
+                    Is_Anchor = FALSE,
+                    Sample_ID = ifelse(count == 1, Sample_ID, paste(paste(count, "samples"), Subject_ID, SwapCat_ID, sep="\n"))
+                ) %>% 
+                select(Sample_ID, Subject_ID, Genotype_Group_ID, SwapCat_ID, SwapCat_Shape, count, vertex_size_scalar, Is_Ghost, Is_Anchor) %>% 
+                distinct()
+        }
+        all_data <- rbind(relabel_data, ghost_data)
+    }
+    
+    if (graph_type == "combined") {
+        genotype_graph <- .generate_graph(relabel_data, "genotype")
+        E(genotype_graph)$genotypes <- TRUE
+        label_graph <- .generate_graph(relabel_data, "label", ghost_data)
+        E(label_graph)$labels <- TRUE 
+        graph <- graph.union(genotype_graph, label_graph, byname=TRUE)
+        E(graph)[is.na(E(graph)$genotypes)]$genotypes <- FALSE
+        E(graph)[is.na(E(graph)$labels)]$labels <- FALSE
+        E(graph)$concordant <- E(graph)$genotypes & E(graph)$labels
+    } else {
+        group_col <- graph_type_mapping[[graph_type]]
+        edges <- all_data %>%
+            group_by_at(group_col) %>%
+            mutate(
+                sample_a = Sample_ID,
+                sample_b = list(Sample_ID)
+            ) %>%
+            ungroup() %>% 
+            unnest(sample_b) %>%
+            transmute(
+                sample1 = pmin(sample_a, sample_b),
+                sample2 = pmax(sample_a, sample_b)
+            ) %>%
+            filter(sample1 != sample2) %>%
+            distinct()
+        vertices <- all_data[, "Sample_ID", drop=FALSE]
+        graph <- graph_from_data_frame(edges, vertices=vertices, directed=FALSE)
+    }
+    
+    if (!populate_plotting_attributes) {return(graph)}
+    
+    ## Specify vertex and edge attributes for plotting
+    vertex_shapes <- data.frame(Sample_ID=names(V(graph))) %>% 
+        left_join(all_data, by="Sample_ID") %>% 
+        pull(SwapCat_Shape)
+    vertex_size_scalars <- data.frame(Sample_ID=names(V(graph))) %>% 
+        left_join(all_data, by="Sample_ID") %>% 
+        pull(vertex_size_scalar)
+    V(graph)$shape <- vertex_shapes
+    V(graph)$size <- 12 * vertex_size_scalars
+    
+    anchor_samples <- relabel_data %>% filter(Is_Anchor) %>% pull(Sample_ID)
+    anchor_samples <- intersect(anchor_samples, V(graph)$name)
+    ghost_samples <- ghost_data %>% pull(Sample_ID)
+    ghost_samples <- intersect(ghost_samples, V(graph)$name)
+    label_not_found_samples <- all_data %>% filter(is.na(Sample_ID)) %>% pull(Sample_ID)
+    label_not_found_samples <- intersect(label_not_found_samples, V(graph)$name)
+    V(graph)$color <- "orange"
+    V(graph)[anchor_samples]$color <- "forestgreen"
+    V(graph)[label_not_found_samples]$color <- "firebrick"
+    V(graph)[ghost_samples]$color <- "lightgrey"
+    
+    if (graph_type == "combined") {
+        E(graph)$color <- ifelse(E(graph)$concordant, "forestgreen", ifelse(E(graph)$genotypes, "orange", "cornflowerblue"))
+        E(graph)[.from(ghost_samples)]$color <- "lightgrey"
+    } else if (graph_type == "label") {
+        E(graph)$color <- "cornflowerblue"
+        E(graph)[.from(ghost_samples)]$color <- "lightgrey"
+    } else {
+        E(graph)$color <- "orange"
+    }
+    E(graph)$width <- 6
+    
+    return(graph)
+}
+
+ .generate_corrections_graph <- function(relabel_data) {
+    applied_relabels <- relabel_data %>% 
+        filter(Init_Sample_ID != Sample_ID) %>% 
+        select(
+            Init_Sample_ID,
+            Sample_ID
+        )
+    corrections_graph <- graph_from_data_frame(applied_relabels, directed=TRUE)
+    ghost_samples <- intersect(V(corrections_graph)$name, relabel_data %>% filter(is.na(Genotype_Group_ID)) %>% pull(Sample_ID))
+    V(corrections_graph)$color <- "orange"
+    V(corrections_graph)[ghost_samples]$color <- "lightgrey"
+    V(corrections_graph)$size <- 24
+    E(corrections_graph)$width <- 9
+    return(corrections_graph)
+}
+
+## TODO: drop duplicate cycles
+.find_directed_cycles <- function(graph, cutoff=1) {
+    assert_that(is_directed(graph), 
+                msg="param 'graph' must be directed")
+    cycles <- list()
+    for (vertex in V(graph)) {
+        in_neighbors <- names(neighbors(graph, vertex, mode="in"))
+        for (in_neighbor in in_neighbors) {
+            simple_paths <- all_simple_paths(graph, vertex, in_neighbor, mode="out", cutoff=cutoff)
+            cycles <- append(cycles, simple_paths)
+        }
+    }
+    cycles <- lapply(cycles, names)
+    return(cycles)
+}
+
+.find_all_relabel_cycles <- function(relabels_graph) {
+    ## TODO: add warning if there are multiple deficiencies
+    relabels <- data.frame(relabel_from=character(0), relabel_to=character(0))
+    all_relabeled_samples <- NULL
+    all_cycles <- list()
+    cutoff <- 1
+    while (vcount(relabels_graph) > 0 && cutoff < max(table(components(relabels_graph)$membership))) {
+        curr_cycles <- .find_directed_cycles(relabels_graph, cutoff=cutoff)
+        for (curr_cycle in curr_cycles) {
+            if (!any(curr_cycle %in% all_relabeled_samples)) {
+                all_cycles <- append(all_cycles, list(curr_cycle))
+                all_relabeled_samples <- c(all_relabeled_samples, curr_cycle)
+                relabels_graph <- delete_vertices(relabels_graph, curr_cycle)
+            }
+        }
+        cutoff <- cutoff + 1
+    }
+    
+    ## From the found cycles, construct relabels dataframe
+    for (curr_cycle in all_cycles) {
+        n <- length(curr_cycle)
+        curr_relabels <- data.frame(
+            relabel_from = curr_cycle,
+            relabel_to = c(curr_cycle[2:n], curr_cycle[1])
+        )
+        relabels <- rbind(relabels, curr_relabels)
+    }
+    
+    return(relabels)
+}
+
+.swap_cats_to_graph <- function(swap_cats) {
+    n <- nrow(swap_cats)
+    if (ncol(swap_cats) < 2) {
+        swap_cats_adjacency_mat <- matrix(TRUE, nrow=n, ncol=n)
+    } else {
+        swap_cats_adjacency_mat <- matrix(FALSE, nrow=n, ncol=n)
+        swap_cats_int <- interaction(swap_cats[, 2:ncol(swap_cats)], sep=":")
+        for (level in levels(swap_cats_int)) {
+            idx <- swap_cats_int == level
+            swap_cats_adjacency_mat[idx, idx] <- TRUE
+        }
+    }
+    rownames(swap_cats_adjacency_mat) <- colnames(swap_cats_adjacency_mat) <- swap_cats$Sample_ID
+    swap_cats_graph <- graph_from_adjacency_matrix(swap_cats_adjacency_mat, mode="directed")
+    return(swap_cats_graph)
+} 
+
+################################################################################
 ##################            VALIDATION HELPERS              ##################
 ################################################################################
 
@@ -1554,194 +1797,6 @@ setMethod("summary", "MislabelSolver",
     
     ## TODO: output a warning if an anchor sample contradicts a majority sample
 }
-
-################################################################################
-##################               GRAPH HELPERS                ##################
-################################################################################
-
-# .plot_graph <- function(graph, to_write=FALSE) {
-#     edge_colors <- if (!is.null(E(graph)$edge_colors)) E(graph)$edge_colors else "grey"
-#     color <- if (!is.null(V(graph)$color)) V(graph)$color else "orange"
-#     layout_custom <- with_seed(layout_nicely(graph), seed=1987)
-#     vertex.label.cex <- 0.6
-#     vertex.size <- 5
-#     edge.arrow.size <- 0.8
-#     edge.width <- 3
-#     if (to_write) {
-#         vertex.label.cex <- 2
-#         vertex.size <- 5
-#         edge.arrow.size <- 3
-#         edge.width <- 8
-#     }
-#     
-#     my_plot <- plot(graph, vertex.size=vertex.size, vertex.label.cex=vertex.label.cex, edge.arrow.size=edge.arrow.size, 
-#                     edge.width=edge.width, edge.color=edge_colors, vertex.color=color, vertex.label.color="black", 
-#                     vertex.frame.color="transparent", layout=layout_custom)
-#     return(my_plot)
-# }
-
-.generate_graph <- function(
-        relabel_data, 
-        graph_type=c("label", "genotype", "combined"), 
-        ghost_relabel_data=NULL, 
-        anchor_samples=character(0),
-        populate_plotting_attributes=FALSE
-) {
-    graph_type_mapping <- list(
-        label = "Subject_ID",
-        genotype = "Genotype_Group_ID",
-        combined = NA_character_
-    )
-    
-    graph_type <- as.character(graph_type)
-    graph_type <- match.arg(graph_type)
-    
-    ghost_samples <- character(0)
-    if (!is.null(ghost_relabel_data)) {
-        ghost_samples <- ghost_relabel_data[, "Sample_ID", drop=TRUE]
-    }
-    
-    if (graph_type == "combined") {
-        genotype_graph <- .generate_graph(relabel_data, "genotype")
-        E(genotype_graph)$genotypes <- TRUE
-        label_graph <- .generate_graph(relabel_data, "label", ghost_relabel_data)
-        E(label_graph)$labels <- TRUE 
-        graph <- graph.union(genotype_graph, label_graph, byname=TRUE)
-        E(graph)[is.na(E(graph)$genotypes)]$genotypes <- FALSE
-        E(graph)[is.na(E(graph)$labels)]$labels <- FALSE
-        E(graph)$concordant <- E(graph)$genotypes & E(graph)$labels
-    } else {
-        if(graph_type == "label" & !is.null(ghost_relabel_data)) {
-            common_cols <- intersect(colnames(relabel_data), colnames(ghost_relabel_data))
-            relabel_data <- rbind(relabel_data[, common_cols], ghost_relabel_data[, common_cols])
-        }
-        group_col <- graph_type_mapping[[graph_type]]
-        edges <- relabel_data %>%
-            group_by_at(group_col) %>%
-            mutate(
-                sample_a = Sample_ID,
-                sample_b = list(Sample_ID)
-            ) %>%
-            ungroup() %>% 
-            unnest(sample_b) %>%
-            transmute(
-                sample1 = pmin(sample_a, sample_b),
-                sample2 = pmax(sample_a, sample_b)
-            ) %>%
-            filter(sample1 != sample2) %>%
-            distinct()
-        vertices <- relabel_data[, "Sample_ID", drop=FALSE]
-        graph <- graph_from_data_frame(edges, vertices=vertices, directed=FALSE)
-    }
-    
-    if (!populate_plotting_attributes) {return(graph)}
-    ## Specify vertex and edge attributes for plotting
-    sample_shapes <- data.frame(Sample_ID=names(V(graph))) %>% 
-        left_join(unsolved_all_data, by="Sample_ID") %>% 
-        pull(SwapCat_Shape)
-    V(graph)$shape <- sample_shapes
-    
-    anchor_samples <- intersect(anchor_samples, V(graph)$name)
-    label_not_found_samples <- V(graph)$name[grepl(LABEL_NOT_FOUND, V(graph)$name)]
-    V(graph)$color <- "orange"
-    V(graph)[anchor_samples]$color <- "forestgreen"
-    V(graph)[label_not_found_samples]$color <- "firebrick"
-    V(graph)$size <- 12
-    if (graph_type == "combined") {
-        V(graph)[ghost_samples]$color <- "lightgrey"
-        E(graph)$color <- ifelse(E(graph)$concordant, "forestgreen", ifelse(E(graph)$genotypes, "orange", "cornflowerblue"))
-        E(graph)[.from(ghost_samples)]$color <- "lightgrey"
-    } else if (graph_type == "label") {
-        V(graph)[ghost_samples]$color <- "lightgrey"
-        E(graph)$color <- "cornflowerblue"
-        E(graph)[.from(ghost_samples)]$color <- "lightgrey"
-    } else {
-        E(graph)$color <- "orange"
-    }
-    E(graph)$width <- 6
-    
-    return(graph)
-}
-
- .generate_corrections_graph <- function(relabel_data) {
-    applied_relabels <- relabel_data %>% 
-        filter(Init_Sample_ID != Sample_ID) %>% 
-        select(
-            Init_Sample_ID,
-            Sample_ID
-        )
-    corrections_graph <- graph_from_data_frame(applied_relabels, directed=TRUE)
-    ghost_samples <- intersect(V(corrections_graph)$name, relabel_data %>% filter(is.na(Genotype_Group_ID)) %>% pull(Sample_ID))
-    V(corrections_graph)$color <- "orange"
-    V(corrections_graph)[ghost_samples]$color <- "lightgrey"
-    V(corrections_graph)$size <- 24
-    E(corrections_graph)$width <- 9
-    return(corrections_graph)
-}
-
-## TODO: drop duplicate cycles
-.find_directed_cycles <- function(graph, cutoff=1) {
-    assert_that(is_directed(graph), 
-                msg="param 'graph' must be directed")
-    cycles <- list()
-    for (vertex in V(graph)) {
-        in_neighbors <- names(neighbors(graph, vertex, mode="in"))
-        for (in_neighbor in in_neighbors) {
-            simple_paths <- all_simple_paths(graph, vertex, in_neighbor, mode="out", cutoff=cutoff)
-            cycles <- append(cycles, simple_paths)
-        }
-    }
-    cycles <- lapply(cycles, names)
-    return(cycles)
-}
-
-.find_all_relabel_cycles <- function(relabels_graph) {
-    ## TODO: add warning if there are multiple deficiencies
-    relabels <- data.frame(relabel_from=character(0), relabel_to=character(0))
-    all_relabeled_samples <- NULL
-    all_cycles <- list()
-    cutoff <- 1
-    while (vcount(relabels_graph) > 0 && cutoff < max(table(components(relabels_graph)$membership))) {
-        curr_cycles <- .find_directed_cycles(relabels_graph, cutoff=cutoff)
-        for (curr_cycle in curr_cycles) {
-            if (!any(curr_cycle %in% all_relabeled_samples)) {
-                all_cycles <- append(all_cycles, list(curr_cycle))
-                all_relabeled_samples <- c(all_relabeled_samples, curr_cycle)
-                relabels_graph <- delete_vertices(relabels_graph, curr_cycle)
-            }
-        }
-        cutoff <- cutoff + 1
-    }
-    
-    ## From the found cycles, construct relabels dataframe
-    for (curr_cycle in all_cycles) {
-        n <- length(curr_cycle)
-        curr_relabels <- data.frame(
-            relabel_from = curr_cycle,
-            relabel_to = c(curr_cycle[2:n], curr_cycle[1])
-        )
-        relabels <- rbind(relabels, curr_relabels)
-    }
-    
-    return(relabels)
-}
-
-.swap_cats_to_graph <- function(swap_cats) {
-    n <- nrow(swap_cats)
-    if (ncol(swap_cats) < 2) {
-        swap_cats_adjacency_mat <- matrix(TRUE, nrow=n, ncol=n)
-    } else {
-        swap_cats_adjacency_mat <- matrix(FALSE, nrow=n, ncol=n)
-        swap_cats_int <- interaction(swap_cats[, 2:ncol(swap_cats)], sep=":")
-        for (level in levels(swap_cats_int)) {
-            idx <- swap_cats_int == level
-            swap_cats_adjacency_mat[idx, idx] <- TRUE
-        }
-    }
-    rownames(swap_cats_adjacency_mat) <- colnames(swap_cats_adjacency_mat) <- swap_cats$Sample_ID
-    swap_cats_graph <- graph_from_adjacency_matrix(swap_cats_adjacency_mat, mode="directed")
-    return(swap_cats_graph)
-} 
 
 ################################################################################
 ##################                  TESTING                   ##################
